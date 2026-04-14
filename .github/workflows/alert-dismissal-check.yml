@@ -18,8 +18,8 @@ name: Alert Dismissal Review
 on:
   # Run on a schedule — default every 15 minutes.
   # Adjust the cron expression to match your preferred polling interval.
-  schedule:
-    - cron: '*/15 * * * *'
+  # schedule:
+  #   - cron: '*/15 * * * *'
 
   # Allow manual runs from the Actions tab (useful for testing and dry-runs).
   workflow_dispatch:
