@@ -39,8 +39,8 @@ function loadConfig() {
 
 const config = loadConfig();
 
-const REQUIRED_PHRASE = config.required_phrase || null;
-const REQUIRED_PATTERN = config.required_pattern || null;
+const REQUIRED_PHRASE = config.required_phrase ?? null;
+const REQUIRED_PATTERN = config.required_pattern ?? null;
 const MINIMUM_LENGTH =
   Number.isFinite(config.minimum_length) && config.minimum_length > 0
     ? config.minimum_length
@@ -131,7 +131,15 @@ function validateDismissalComment(comment) {
   // 3. Required pattern (regex) -----------------------------------------
   if (REQUIRED_PATTERN) {
     const flags = CASE_SENSITIVE ? '' : 'i';
-    const regex = new RegExp(REQUIRED_PATTERN, flags);
+    let regex;
+    try {
+      regex = new RegExp(REQUIRED_PATTERN, flags);
+    } catch (e) {
+      return {
+        valid: false,
+        reason: `The configured required_pattern is not a valid regular expression: ${e.message}`,
+      };
+    }
     if (!regex.test(trimmed)) {
       return {
         valid: false,
