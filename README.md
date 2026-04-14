@@ -111,8 +111,8 @@ In the repository that hosts this workflow, go to
 
 | Secret name | Value |
 |---|---|
-| `APP_ID` | The numeric App ID from step 1.7 |
-| `APP_PRIVATE_KEY` | The full contents of the `.pem` file, including the `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----` lines |
+| `ALERT_DISMISSAL_APP_ID` | The numeric App ID from step 1.7 |
+| `ALERT_DISMISSAL_APP_PRIVATE_KEY` | The full contents of the `.pem` file, including the `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----` lines |
 
 ---
 
