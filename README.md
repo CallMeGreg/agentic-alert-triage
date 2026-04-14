@@ -24,8 +24,9 @@ named, auditable identity rather than a personal access token.
                                 │      secret scanning,            │
                                 │      Dependabot)                 │
                                 │  4. Validate requester comment   │
-                                │     ✅ contains phrase?          │
-                                │     ✅ not blank?                │
+                                │     ✅ meets minimum length?     │
+                                │     ✅ contains required phrase?  │
+                                │     ✅ matches required pattern?  │
                                 │  5. If invalid:                  │
                                 │     • Deny the request via       │
                                 │       the review endpoint        │
@@ -33,11 +34,18 @@ named, auditable identity rather than a personal access token.
                                 └──────────────────────────────────┘
 ```
 
-A dismissal request is **denied** if the requester's comment is:
+A dismissal request is **denied** if the requester's comment:
 
-* **Blank** (empty or whitespace-only), OR
-* Does **not** contain the phrase `mitigating control`
-  (configurable in `config.yml`)
+* Does **not** contain the required phrase (e.g. `mitigating control`), if
+  `required_phrase` is configured
+* Does **not** match the required regular expression pattern, if
+  `required_pattern` is configured
+* Is shorter than `minimum_length` characters (after trimming whitespace), if
+  `minimum_length` is configured
+
+Each criterion is **optional**.  If omitted from `config.yml`, that check is
+not enforced.  If no criteria are configured, all comments are accepted and
+left for human review.
 
 When denied, the dismissal request is rejected via GitHub's review API with a
 detailed message explaining why the request was denied, so the requester can see
@@ -122,11 +130,14 @@ Edit [`config.yml`](config.yml) in the root of this repository.  All settings
 are documented inline.  The most important ones:
 
 ```yaml
-# Phrase that must appear in every dismissal request comment
+# Phrase that must appear in every dismissal request comment (optional)
 required_phrase: "mitigating control"
 
-# Deny blank dismissal request comments
-deny_blank_comments: true
+# Regular expression the comment must match (optional)
+# required_pattern: "JIRA-\\d+"
+
+# Minimum comment length after trimming whitespace (optional)
+# minimum_length: 20
 
 # Alert types to monitor
 alert_types:

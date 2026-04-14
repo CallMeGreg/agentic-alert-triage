@@ -39,8 +39,12 @@ function loadConfig() {
 
 const config = loadConfig();
 
-const REQUIRED_PHRASE = config.required_phrase || 'mitigating control';
-const DENY_BLANK = config.deny_blank_comments !== false;
+const REQUIRED_PHRASE = config.required_phrase ?? null;
+const REQUIRED_PATTERN = config.required_pattern ?? null;
+const MINIMUM_LENGTH =
+  Number.isFinite(config.minimum_length) && config.minimum_length > 0
+    ? config.minimum_length
+    : null;
 const CASE_SENSITIVE = config.case_sensitive === true;
 const ALERT_TYPES = Array.isArray(config.alert_types)
   ? config.alert_types
@@ -91,29 +95,57 @@ function getOrg() {
 /**
  * Checks whether a dismissal comment satisfies the configured criteria.
  *
+ * Each check is only enforced when the corresponding configuration value is
+ * set.  If none of the optional criteria are configured every comment is
+ * considered valid.
+ *
  * @param {string|null|undefined} comment
  * @returns {{ valid: boolean, reason?: string }}
  */
 function validateDismissalComment(comment) {
   const trimmed = (comment || '').trim();
 
-  if (DENY_BLANK && trimmed === '') {
+  // 1. Minimum length --------------------------------------------------
+  if (MINIMUM_LENGTH != null && trimmed.length < MINIMUM_LENGTH) {
     return {
       valid: false,
-      reason: 'The dismissal comment was blank or empty.',
+      reason: `The dismissal comment must be at least ${MINIMUM_LENGTH} characters long (found ${trimmed.length}).`,
     };
   }
 
-  const haystack = CASE_SENSITIVE ? trimmed : trimmed.toLowerCase();
-  const needle = CASE_SENSITIVE
-    ? REQUIRED_PHRASE
-    : REQUIRED_PHRASE.toLowerCase();
+  // 2. Required phrase --------------------------------------------------
+  if (REQUIRED_PHRASE) {
+    const haystack = CASE_SENSITIVE ? trimmed : trimmed.toLowerCase();
+    const needle = CASE_SENSITIVE
+      ? REQUIRED_PHRASE
+      : REQUIRED_PHRASE.toLowerCase();
 
-  if (!haystack.includes(needle)) {
-    return {
-      valid: false,
-      reason: `The dismissal comment did not include the required phrase: "${REQUIRED_PHRASE}"`,
-    };
+    if (!haystack.includes(needle)) {
+      return {
+        valid: false,
+        reason: `The dismissal comment did not include the required phrase: "${REQUIRED_PHRASE}"`,
+      };
+    }
+  }
+
+  // 3. Required pattern (regex) -----------------------------------------
+  if (REQUIRED_PATTERN) {
+    const flags = CASE_SENSITIVE ? '' : 'i';
+    let regex;
+    try {
+      regex = new RegExp(REQUIRED_PATTERN, flags);
+    } catch (e) {
+      return {
+        valid: false,
+        reason: `The configured required_pattern is not a valid regular expression: ${e.message}`,
+      };
+    }
+    if (!regex.test(trimmed)) {
+      return {
+        valid: false,
+        reason: `The dismissal comment did not match the required pattern: "${REQUIRED_PATTERN}"`,
+      };
+    }
   }
 
   return { valid: true };
@@ -130,14 +162,7 @@ Your request to dismiss this **{alert_type}** alert (#{alert_number}) has been a
 
 **Reason:** {denial_reason}
 
-### Requirements
-
-To have a dismissal request accepted, the comment must:
-
-1. **Not be blank** — provide a meaningful justification.
-2. **Include the phrase** \`{required_phrase}\` — this confirms that a mitigating control has been identified and documented.
-
-Please re-submit a dismissal request with an updated comment that satisfies both requirements.
+Please re-submit a dismissal request with an updated comment that satisfies the requirements.
 
 ---
 *This action was performed automatically by the [Alert Dismissal Automation](https://github.com/{repo_full_name}) workflow.*`;
@@ -165,7 +190,7 @@ function formatDenialMessage({
     .replace(/{alert_type}/g, alertType.replace(/_/g, ' '))
     .replace(/{alert_number}/g, String(alertNumber))
     .replace(/{requester}/g, requester || 'unknown')
-    .replace(/{required_phrase}/g, REQUIRED_PHRASE)
+    .replace(/{required_phrase}/g, REQUIRED_PHRASE || '')
     .replace(/{denial_reason}/g, denialReason)
     .replace(/{repo_full_name}/g, repoFullName);
 }
@@ -425,8 +450,9 @@ async function main() {
 
   console.log('Configuration:');
   console.log(`  organization        : ${org}`);
-  console.log(`  required_phrase     : "${REQUIRED_PHRASE}"`);
-  console.log(`  deny_blank_comments : ${DENY_BLANK}`);
+  console.log(`  required_phrase     : ${REQUIRED_PHRASE ? `"${REQUIRED_PHRASE}"` : '(not set)'}`);
+  console.log(`  required_pattern    : ${REQUIRED_PATTERN ? `"${REQUIRED_PATTERN}"` : '(not set)'}`);
+  console.log(`  minimum_length      : ${MINIMUM_LENGTH != null ? MINIMUM_LENGTH : '(not set)'}`);
   console.log(`  case_sensitive      : ${CASE_SENSITIVE}`);
   console.log(`  alert_types         : ${ALERT_TYPES.join(', ')}`);
 

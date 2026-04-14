@@ -52,10 +52,13 @@ Requires **delegated alert dismissal** to be enabled in the GitHub organization.
    `dependabot`), calls the **org-level** dismissal request listing endpoint
    with `request_status=open` to fetch all pending requests.
 4. For each pending request, calls `validateDismissalComment()` on the
-   `requester_comment` field:
-   - Denies blank comments if `deny_blank_comments: true`.
+   `requester_comment` field.  Each of the following checks is only enforced
+   when the corresponding config value is set (all are optional):
+   - Denies comments shorter than `minimum_length` characters.
    - Denies comments that do not contain `required_phrase`
      (case-insensitive by default).
+   - Denies comments that do not match `required_pattern` (regex,
+     case-insensitive by default).
 5. If invalid:
    - **Denies the dismissal request** via the per-repo review endpoint
      (`PATCH /repos/{owner}/{repo}/dismissal-requests/{type}/{alert_number}`)
@@ -85,9 +88,10 @@ const { validateDismissalComment, formatDenialMessage } = require('./scripts/che
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `required_phrase` | string | `"mitigating control"` | Phrase that must appear in every dismissal request comment. |
-| `deny_blank_comments` | bool | `true` | Deny blank or whitespace-only comments. |
-| `case_sensitive` | bool | `false` | Whether the phrase check is case-sensitive. |
+| `required_phrase` | string | *(none)* | Phrase that must appear in every dismissal request comment. Optional — if omitted, not enforced. |
+| `required_pattern` | string | *(none)* | Regular expression the comment must match (JavaScript RegExp syntax). Optional — if omitted, not enforced. |
+| `minimum_length` | number | *(none)* | Minimum character count (after trimming) for the comment. Optional — if omitted, not enforced. |
+| `case_sensitive` | bool | `false` | Whether `required_phrase` and `required_pattern` checks are case-sensitive. |
 | `alert_types` | list | `[code_scanning, secret_scanning, dependabot]` | Alert categories to monitor. |
 | `organization` | string | *(owner of GITHUB_REPOSITORY)* | GitHub organization to monitor. |
 | `create_denial_issues` | bool | `true` | Create a GitHub Issue for each denial. |
