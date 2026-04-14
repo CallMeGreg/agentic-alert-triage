@@ -1,0 +1,72 @@
+# =============================================================================
+# Alert Dismissal Automation — Configuration
+# =============================================================================
+# Edit this file to customize the automation behavior.
+# After changing this file, commit and push — no workflow edits are needed.
+
+# ---------------------------------------------------------------------------
+# CRITERIA: What makes a valid dismissal comment?
+# ---------------------------------------------------------------------------
+
+# The phrase that MUST appear in every dismissal comment (case-insensitive by
+# default; set case_sensitive: true to require exact casing).
+required_phrase: "mitigating control"
+
+# Treat a blank or whitespace-only comment as an automatic denial.
+deny_blank_comments: true
+
+# Whether the required_phrase check is case-sensitive.
+case_sensitive: false
+
+# ---------------------------------------------------------------------------
+# ALERT TYPES: Which alert categories should be monitored?
+# ---------------------------------------------------------------------------
+# Supported values: code_scanning | secret_scanning | dependabot
+alert_types:
+  - code_scanning
+  - secret_scanning
+  - dependabot
+
+# ---------------------------------------------------------------------------
+# SCOPE: Which organization should be monitored?
+# ---------------------------------------------------------------------------
+# The automation queries org-level dismissal request endpoints and processes
+# all pending requests across every repository in the organization.
+#
+# Delegated alert dismissal must be enabled in the organization for these
+# endpoints to be available.
+#
+# If not set, the owner component of GITHUB_REPOSITORY is used (i.e. the org
+# that owns the repository running this workflow).
+#
+# organization: my-org
+
+# ---------------------------------------------------------------------------
+# DENIAL NOTIFICATIONS: Create a GitHub Issue for each denied dismissal?
+# ---------------------------------------------------------------------------
+create_denial_issues: true
+
+# Labels applied to denial notification issues (must already exist in the repo
+# where the issue is created — typically the repo the alert belongs to).
+denial_issue_labels:
+  - dismissal-denied
+
+# ---------------------------------------------------------------------------
+# DENIAL MESSAGE TEMPLATE
+# ---------------------------------------------------------------------------
+# Customize the body of the denial notification issue.
+# Available placeholders:
+#   {alert_type}      — e.g. "code scanning"
+#   {alert_number}    — numeric alert ID
+#   {required_phrase} — value of required_phrase above
+#   {denial_reason}   — human-readable reason for the denial
+#   {requester}       — GitHub username of the person who submitted the request
+#   {repo_full_name}  — "owner/repo" of the monitored repository
+#
+# The default template is used when this key is absent or empty.
+# denial_message: |
+#   ## ⚠️ Alert Dismissal Request Denied
+#   Your request to dismiss this alert has been automatically denied.
+#   **Reason:** {denial_reason}
+#   Please re-submit with a comment that includes: `{required_phrase}`
+

@@ -1,0 +1,93 @@
+# .github/workflows/alert-dismissal-check.yml
+#
+# Scheduled workflow that polls GitHub's org-level alert dismissal request APIs
+# for pending requests and automatically denies any whose comment does not
+# satisfy the criteria defined in config.yml.
+#
+# Requires delegated alert dismissal to be enabled in the organization.
+# Authentication uses a GitHub App token so that all actions are attributed to
+# the App and not to a personal account.  The App must be installed in the
+# organization it is expected to manage.
+#
+# Required repository secrets:
+#   APP_ID          — Numeric GitHub App ID (e.g. 123456)
+#   APP_PRIVATE_KEY — GitHub App private key in PEM format
+
+name: Alert Dismissal Review
+
+on:
+  # Run on a schedule — default every 15 minutes.
+  # Adjust the cron expression to match your preferred polling interval.
+  schedule:
+    - cron: '*/15 * * * *'
+
+  # Allow manual runs from the Actions tab (useful for testing and dry-runs).
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >
+          Dry run — log what would change but make no API calls that modify
+          alert state or create issues.
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+# Minimal permissions for the built-in GITHUB_TOKEN.
+# The actual work is done with the GitHub App token generated below.
+permissions:
+  contents: read
+
+jobs:
+  check-dismissals:
+    name: Check Alert Dismissal Requests
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Check out the repository so config.yml and the script are available.
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+
+      # -----------------------------------------------------------------------
+      # 2. Exchange the App credentials for a short-lived installation token.
+      #    The token is scoped to the repositories the App is installed in.
+      # -----------------------------------------------------------------------
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3.1.1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      # -----------------------------------------------------------------------
+      # 3. Set up the Node.js runtime.
+      # -----------------------------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v6.3.0
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      # -----------------------------------------------------------------------
+      # 4. Install dependencies from the lock file for a reproducible build.
+      # -----------------------------------------------------------------------
+      - name: Install dependencies
+        run: npm ci
+
+      # -----------------------------------------------------------------------
+      # 5. Run the dismissal check script.
+      # -----------------------------------------------------------------------
+      - name: Check alert dismissal requests
+        run: node scripts/check-dismissals.js
+        env:
+          # Use the App token — NOT the built-in GITHUB_TOKEN — so that API
+          # calls are attributed to the GitHub App identity.
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          # Override the config file path when needed (optional).
+          # CONFIG_PATH: config.yml
