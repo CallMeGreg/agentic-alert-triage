@@ -10,8 +10,8 @@
 # organization it is expected to manage.
 #
 # Required repository secrets:
-#   APP_ID          — Numeric GitHub App ID (e.g. 123456)
-#   APP_PRIVATE_KEY — GitHub App private key in PEM format
+#   ALERT_DISMISSAL_APP_ID          — Numeric GitHub App ID (e.g. 123456)
+#   ALERT_DISMISSAL_APP_PRIVATE_KEY — GitHub App private key in PEM format
 
 name: Alert Dismissal Review
 
@@ -60,8 +60,8 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3.1.1
         with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.ALERT_DISMISSAL_APP_ID }}
+          private-key: ${{ secrets.ALERT_DISMISSAL_APP_PRIVATE_KEY }}
 
       # -----------------------------------------------------------------------
       # 3. Set up the Node.js runtime.

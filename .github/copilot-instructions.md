@@ -125,8 +125,8 @@ Template placeholders for `denial_message`:
 
 | Secret | Description |
 |---|---|
-| `APP_ID` | Numeric GitHub App ID |
-| `APP_PRIVATE_KEY` | GitHub App private key (full PEM content, including headers) |
+| `ALERT_DISMISSAL_APP_ID` | Numeric GitHub App ID |
+| `ALERT_DISMISSAL_APP_PRIVATE_KEY` | GitHub App private key (full PEM content, including headers) |
 
 ---
 
