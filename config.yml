@@ -1,0 +1,77 @@
+# =============================================================================
+# Alert Dismissal Automation — Configuration
+# =============================================================================
+# Edit this file to customize the automation behavior.
+# After changing this file, commit and push — no workflow edits are needed.
+
+# ---------------------------------------------------------------------------
+# CRITERIA: What makes a valid dismissal comment?
+# ---------------------------------------------------------------------------
+
+# The phrase that MUST appear in every dismissal comment (case-insensitive by
+# default; set case_sensitive: true to require exact casing).
+required_phrase: "mitigating control"
+
+# Treat a blank or whitespace-only comment as an automatic denial.
+deny_blank_comments: true
+
+# Whether the required_phrase check is case-sensitive.
+case_sensitive: false
+
+# ---------------------------------------------------------------------------
+# ALERT TYPES: Which alert categories should be monitored?
+# ---------------------------------------------------------------------------
+# Supported values: code_scanning | secret_scanning | dependabot
+alert_types:
+  - code_scanning
+  - secret_scanning
+  - dependabot
+
+# ---------------------------------------------------------------------------
+# SCOPE: Which repositories should be monitored?
+# ---------------------------------------------------------------------------
+# Leave both options commented out to monitor only the repository that hosts
+# this workflow.
+
+# Monitor specific repositories (format: "owner/repo"):
+# repositories:
+#   - my-org/repo-one
+#   - my-org/repo-two
+
+# Monitor ALL repositories in an organization:
+# organization: my-org
+
+# ---------------------------------------------------------------------------
+# POLLING WINDOW
+# ---------------------------------------------------------------------------
+# How far back (in minutes) to look for newly dismissed alerts on each run.
+# This should be slightly larger than the workflow schedule interval to ensure
+# no dismissals are missed between runs.
+polling_window_minutes: 30
+
+# ---------------------------------------------------------------------------
+# DENIAL NOTIFICATIONS: Create a GitHub Issue for each denied dismissal?
+# ---------------------------------------------------------------------------
+create_denial_issues: true
+
+# Labels applied to denial notification issues (must already exist in the repo).
+denial_issue_labels:
+  - dismissal-denied
+
+# ---------------------------------------------------------------------------
+# DENIAL MESSAGE TEMPLATE
+# ---------------------------------------------------------------------------
+# Customize the body of the denial notification issue.
+# Available placeholders:
+#   {alert_type}      — e.g. "code scanning"
+#   {alert_number}    — numeric alert ID
+#   {required_phrase} — value of required_phrase above
+#   {denial_reason}   — human-readable reason for the denial
+#   {repo_full_name}  — "owner/repo" of the monitored repository
+#
+# The default template is used when this key is absent or empty.
+# denial_message: |
+#   ## ⚠️ Alert Dismissal Request Denied
+#   Your request to dismiss this alert has been automatically denied.
+#   **Reason:** {denial_reason}
+#   Please re-dismiss with a comment that includes: `{required_phrase}`
