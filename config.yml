@@ -7,15 +7,23 @@
 # ---------------------------------------------------------------------------
 # CRITERIA: What makes a valid dismissal comment?
 # ---------------------------------------------------------------------------
+# Each criterion below is optional.  If a value is omitted (or commented out),
+# that check is not enforced.  If none are configured, all comments are
+# accepted and left for human review.
 
 # The phrase that MUST appear in every dismissal comment (case-insensitive by
 # default; set case_sensitive: true to require exact casing).
 required_phrase: "mitigating control"
 
-# Treat a blank or whitespace-only comment as an automatic denial.
-deny_blank_comments: true
+# A regular expression pattern the comment must match.  Uses JavaScript RegExp
+# syntax.  Honors the case_sensitive setting.
+# required_pattern: "JIRA-\\d+"
 
-# Whether the required_phrase check is case-sensitive.
+# The minimum number of characters (after trimming whitespace) required in the
+# dismissal comment.
+# minimum_length: 20
+
+# Whether the required_phrase and required_pattern checks are case-sensitive.
 case_sensitive: false
 
 # ---------------------------------------------------------------------------
