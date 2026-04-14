@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 // scripts/check-dismissals.js
 //
-// Polls GitHub security alert APIs for recently dismissed alerts and
-// automatically re-opens (denies) any dismissal whose comment does not meet
+// Polls GitHub's alert dismissal request APIs for pending (open) dismissal
+// requests and automatically denies any request whose comment does not meet
 // the criteria defined in config.yml.
 //
+// Uses org-level listing endpoints to discover all pending requests across
+// every repository in the organization, then calls the per-repo review
+// endpoint to deny non-compliant ones.
+//
+// Requires delegated alert dismissal to be enabled on the organization.
 // Designed to run as a scheduled GitHub Actions workflow using a GitHub App
-// token so that it operates under a named, auditable identity rather than a
-// personal access token.
+// token so that all actions are attributed to a named, auditable identity.
 
 'use strict';
 
@@ -38,10 +42,6 @@ const config = loadConfig();
 const REQUIRED_PHRASE = config.required_phrase || 'mitigating control';
 const DENY_BLANK = config.deny_blank_comments !== false;
 const CASE_SENSITIVE = config.case_sensitive === true;
-const POLLING_WINDOW_MINUTES =
-  typeof config.polling_window_minutes === 'number'
-    ? config.polling_window_minutes
-    : 30;
 const ALERT_TYPES = Array.isArray(config.alert_types)
   ? config.alert_types
   : ['code_scanning', 'secret_scanning', 'dependabot'];
@@ -51,14 +51,42 @@ const DENIAL_ISSUE_LABELS = Array.isArray(config.denial_issue_labels)
   : ['dismissal-denied'];
 const DRY_RUN = process.env.DRY_RUN === 'true';
 
-const SECONDS_PER_MINUTE = 60;
-const MILLISECONDS_PER_SECOND = 1000;
+// All new dismissal request endpoints require this API version header.
+const API_VERSION = '2026-03-10';
+
+// Maximum length allowed by the dismissal request review API for the message body.
+const MAX_DENIAL_MESSAGE_LENGTH = 2048;
 
 // ---------------------------------------------------------------------------
 // GitHub client
 // ---------------------------------------------------------------------------
 
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+
+// ---------------------------------------------------------------------------
+// Organization resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the GitHub organization name to monitor.
+ * Falls back to the owner component of GITHUB_REPOSITORY when
+ * config.organization is not set.
+ *
+ * @returns {string}
+ */
+function getOrg() {
+  if (config.organization) return config.organization;
+
+  if (process.env.GITHUB_REPOSITORY) {
+    return process.env.GITHUB_REPOSITORY.split('/')[0];
+  }
+
+  console.error(
+    '[ERROR] Cannot determine organization. ' +
+      'Set "organization" in config.yml or run inside a GitHub Actions context.'
+  );
+  process.exit(1);
+}
 
 // ---------------------------------------------------------------------------
 // Validation logic
@@ -113,7 +141,7 @@ To have a dismissal request accepted, the comment must:
 1. **Not be blank** — provide a meaningful justification.
 2. **Include the phrase** \`{required_phrase}\` — this confirms that a mitigating control has been identified and documented.
 
-Please re-dismiss the alert with an updated comment that satisfies both requirements.
+Please re-submit a dismissal request with an updated comment that satisfies both requirements.
 
 ---
 *This action was performed automatically by the [Alert Dismissal Automation](https://github.com/{repo_full_name}) workflow.*`;
@@ -151,7 +179,7 @@ function formatDenialMessage({
 // ---------------------------------------------------------------------------
 
 /**
- * Creates a GitHub Issue to notify the team about a denied dismissal.
+ * Creates a GitHub Issue to notify the team about a denied dismissal request.
  *
  * @param {string} owner
  * @param {string} repo
@@ -179,7 +207,7 @@ async function createDenialIssue(
 
   if (DRY_RUN) {
     console.log(
-      `  [DRY RUN] Would create issue: "${title}" in ${repoFullName}`
+      `     [DRY RUN] Would create issue: "${title}" in ${repoFullName}`
     );
     return;
   }
@@ -193,13 +221,13 @@ async function createDenialIssue(
       labels: DENIAL_ISSUE_LABELS,
     });
     console.log(
-      `  📝 Created denial notification issue #${issue.number}: ${issue.html_url}`
+      `     📝 Created denial notification issue #${issue.number}: ${issue.html_url}`
     );
   } catch (error) {
     // Issues may be disabled in the repo — degrade gracefully.
     if (error.status === 410 || error.status === 403 || error.status === 404) {
       console.warn(
-        `  ⚠️  Could not create issue in ${repoFullName} (HTTP ${error.status}): ${error.message}`
+        `     ⚠️  Could not create issue in ${repoFullName} (HTTP ${error.status}): ${error.message}`
       );
     } else {
       throw error;
@@ -208,115 +236,105 @@ async function createDenialIssue(
 }
 
 // ---------------------------------------------------------------------------
-// Repository discovery
+// Dismissal request review (deny)
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the list of {owner, name} pairs to monitor based on config.
+ * Calls the review endpoint to deny a dismissal request.
  *
- * @returns {Promise<Array<{owner: string, name: string}>>}
+ * @param {string} owner
+ * @param {string} repo
+ * @param {string} alertType  — 'code-scanning' | 'secret-scanning' | 'dependabot'
+ * @param {number} alertNumber
+ * @param {string} message    — reason for denial (≤ 2048 chars)
  */
-async function getReposToCheck() {
-  if (config.repositories && config.repositories.length > 0) {
-    return config.repositories.map((spec) => {
-      const [owner, name] = spec.split('/');
-      return { owner, name };
-    });
-  }
+async function denyDismissalRequest(owner, repo, alertType, alertNumber, message) {
+  const truncatedMessage =
+    message.length > MAX_DENIAL_MESSAGE_LENGTH
+      ? message.slice(0, MAX_DENIAL_MESSAGE_LENGTH - 3) + '...'
+      : message;
 
-  if (config.organization) {
-    console.log(
-      `\n🔎 Discovering repositories for org: ${config.organization}`
-    );
-    const orgRepos = await octokit.paginate(
-      octokit.rest.repos.listForOrg,
-      { org: config.organization, type: 'all', per_page: 100 }
-    );
-    return orgRepos.map((r) => ({
-      owner: config.organization,
-      name: r.name,
-    }));
-  }
-
-  // Fall back to the repository that is running this workflow.
-  if (!process.env.GITHUB_REPOSITORY) {
-    console.error(
-      '[ERROR] GITHUB_REPOSITORY is not set and no repositories are configured in config.yml.'
-    );
-    process.exit(1);
-  }
-  const [owner, name] = process.env.GITHUB_REPOSITORY.split('/');
-  return [{ owner, name }];
+  await octokit.request(
+    `PATCH /repos/{owner}/{repo}/dismissal-requests/${alertType}/{alert_number}`,
+    {
+      owner,
+      repo,
+      alert_number: alertNumber,
+      status: 'deny',
+      message: truncatedMessage,
+      headers: { 'X-GitHub-Api-Version': API_VERSION },
+    }
+  );
 }
 
 // ---------------------------------------------------------------------------
-// Cut-off timestamp (shared across all checks in this run)
+// Code Scanning dismissal requests
 // ---------------------------------------------------------------------------
 
-const cutoffTime = new Date(
-  Date.now() -
-    POLLING_WINDOW_MINUTES * SECONDS_PER_MINUTE * MILLISECONDS_PER_SECOND
-);
+async function processCodeScanningRequests(org) {
+  console.log(`\n  🔍 Code scanning dismissal requests…`);
 
-// ---------------------------------------------------------------------------
-// Code Scanning
-// ---------------------------------------------------------------------------
-
-async function processCodeScanningAlerts(owner, repo) {
-  console.log(`\n  🔍 Code scanning alerts…`);
-
-  let alerts;
+  let requests;
   try {
-    alerts = await octokit.paginate(
-      octokit.rest.codeScanning.listAlertsForRepo,
-      { owner, repo, state: 'dismissed', per_page: 100 }
+    requests = await octokit.paginate(
+      'GET /orgs/{org}/dismissal-requests/code-scanning',
+      {
+        org,
+        request_status: 'open',
+        per_page: 100,
+        headers: { 'X-GitHub-Api-Version': API_VERSION },
+      }
     );
   } catch (error) {
-    if (error.status === 404) {
-      console.log('     Code scanning not enabled — skipping.');
+    if (error.status === 404 || error.status === 403) {
+      console.log(
+        `     Code scanning dismissal requests not available (HTTP ${error.status}) — skipping.`
+      );
       return;
     }
     throw error;
   }
 
-  const recent = alerts.filter(
-    (a) => a.dismissed_at && new Date(a.dismissed_at) > cutoffTime
-  );
-  console.log(
-    `     ${recent.length} dismissal(s) in the last ${POLLING_WINDOW_MINUTES} min.`
-  );
+  console.log(`     ${requests.length} open request(s) found.`);
 
-  for (const alert of recent) {
-    const result = validateDismissalComment(alert.dismissed_comment);
+  for (const req of requests) {
+    const repoFullName = req.repository.full_name;
+    const [owner, repo] = repoFullName.split('/');
+    // For code scanning dismissal requests, data[0].alert_number holds the
+    // alert number.  Fall back to resource_identifier if data is unavailable.
+    const alertNumber = Number(
+      (req.data && req.data[0] && req.data[0].alert_number != null)
+        ? req.data[0].alert_number
+        : req.resource_identifier
+    );
+    const requester = req.requester?.actor_name;
+
+    const result = validateDismissalComment(req.requester_comment);
+
     if (result.valid) {
       console.log(
-        `     ✅ Alert #${alert.number} — valid comment, keeping dismissed.`
+        `     ✅ Request #${req.number} (${repoFullName} alert #${alertNumber}) — valid comment, leaving open for human review.`
       );
       continue;
     }
 
     console.log(
-      `     ❌ Alert #${alert.number} — DENIED: ${result.reason}`
+      `     ❌ Request #${req.number} (${repoFullName} alert #${alertNumber}) — DENIED: ${result.reason}`
     );
 
     if (!DRY_RUN) {
-      await octokit.rest.codeScanning.updateAlert({
-        owner,
-        repo,
-        alert_number: alert.number,
-        state: 'open',
-      });
-      console.log(`     🔓 Re-opened alert #${alert.number}.`);
+      await denyDismissalRequest(owner, repo, 'code-scanning', alertNumber, result.reason);
+      console.log(`     🚫 Denied dismissal request #${req.number}.`);
     } else {
-      console.log(`     [DRY RUN] Would re-open alert #${alert.number}.`);
+      console.log(`     [DRY RUN] Would deny dismissal request #${req.number}.`);
     }
 
     if (CREATE_DENIAL_ISSUES) {
       await createDenialIssue(owner, repo, {
         alertType: 'code_scanning',
-        alertNumber: alert.number,
-        alertUrl: alert.html_url,
-        requester: alert.dismissed_by?.login,
+        alertNumber,
+        alertUrl: req.html_url,
+        requester,
         denialReason: result.reason,
       });
     }
@@ -324,75 +342,69 @@ async function processCodeScanningAlerts(owner, repo) {
 }
 
 // ---------------------------------------------------------------------------
-// Secret Scanning
+// Secret Scanning dismissal requests
 // ---------------------------------------------------------------------------
 
-// These are the resolution values that represent a user-initiated dismissal
-// (as opposed to automated revocations or pattern changes).
-const SECRET_SCANNING_DISMISSAL_RESOLUTIONS = new Set([
-  'false_positive',
-  'wont_fix',
-  'used_in_tests',
-]);
+async function processSecretScanningRequests(org) {
+  console.log(`\n  🔍 Secret scanning dismissal requests…`);
 
-async function processSecretScanningAlerts(owner, repo) {
-  console.log(`\n  🔍 Secret scanning alerts…`);
-
-  let alerts;
+  let requests;
   try {
-    alerts = await octokit.paginate(
-      octokit.rest.secretScanning.listAlertsForRepo,
-      { owner, repo, state: 'resolved', per_page: 100 }
+    requests = await octokit.paginate(
+      'GET /orgs/{org}/dismissal-requests/secret-scanning',
+      {
+        org,
+        request_status: 'open',
+        per_page: 100,
+        headers: { 'X-GitHub-Api-Version': API_VERSION },
+      }
     );
   } catch (error) {
-    if (error.status === 404) {
-      console.log('     Secret scanning not enabled — skipping.');
+    if (error.status === 404 || error.status === 403) {
+      console.log(
+        `     Secret scanning dismissal requests not available (HTTP ${error.status}) — skipping.`
+      );
       return;
     }
     throw error;
   }
 
-  const recent = alerts.filter(
-    (a) =>
-      a.resolved_at &&
-      new Date(a.resolved_at) > cutoffTime &&
-      SECRET_SCANNING_DISMISSAL_RESOLUTIONS.has(a.resolution)
-  );
-  console.log(
-    `     ${recent.length} dismissal(s) in the last ${POLLING_WINDOW_MINUTES} min.`
-  );
+  console.log(`     ${requests.length} open request(s) found.`);
 
-  for (const alert of recent) {
-    const result = validateDismissalComment(alert.resolution_comment);
+  for (const req of requests) {
+    const repoFullName = req.repository.full_name;
+    const [owner, repo] = repoFullName.split('/');
+    // For secret scanning dismissal requests, resource_identifier is the
+    // numeric alert number (unlike code scanning where it is "repo_id/alert").
+    const alertNumber = Number(req.resource_identifier);
+    const requester = req.requester?.actor_name;
+
+    const result = validateDismissalComment(req.requester_comment);
+
     if (result.valid) {
       console.log(
-        `     ✅ Alert #${alert.number} — valid comment, keeping resolved.`
+        `     ✅ Request #${req.number} (${repoFullName} alert #${alertNumber}) — valid comment, leaving open for human review.`
       );
       continue;
     }
 
     console.log(
-      `     ❌ Alert #${alert.number} — DENIED: ${result.reason}`
+      `     ❌ Request #${req.number} (${repoFullName} alert #${alertNumber}) — DENIED: ${result.reason}`
     );
 
     if (!DRY_RUN) {
-      await octokit.rest.secretScanning.updateAlert({
-        owner,
-        repo,
-        alert_number: alert.number,
-        state: 'open',
-      });
-      console.log(`     🔓 Re-opened alert #${alert.number}.`);
+      await denyDismissalRequest(owner, repo, 'secret-scanning', alertNumber, result.reason);
+      console.log(`     🚫 Denied dismissal request #${req.number}.`);
     } else {
-      console.log(`     [DRY RUN] Would re-open alert #${alert.number}.`);
+      console.log(`     [DRY RUN] Would deny dismissal request #${req.number}.`);
     }
 
     if (CREATE_DENIAL_ISSUES) {
       await createDenialIssue(owner, repo, {
         alertType: 'secret_scanning',
-        alertNumber: alert.number,
-        alertUrl: alert.html_url,
-        requester: alert.resolved_by?.login,
+        alertNumber,
+        alertUrl: req.html_url,
+        requester,
         denialReason: result.reason,
       });
     }
@@ -400,64 +412,69 @@ async function processSecretScanningAlerts(owner, repo) {
 }
 
 // ---------------------------------------------------------------------------
-// Dependabot
+// Dependabot dismissal requests
 // ---------------------------------------------------------------------------
 
-async function processDependabotAlerts(owner, repo) {
-  console.log(`\n  🔍 Dependabot alerts…`);
+async function processDependabotRequests(org) {
+  console.log(`\n  🔍 Dependabot dismissal requests…`);
 
-  let alerts;
+  let requests;
   try {
-    alerts = await octokit.paginate(
-      octokit.rest.dependabot.listAlertsForRepo,
-      { owner, repo, state: 'dismissed', per_page: 100 }
+    requests = await octokit.paginate(
+      'GET /orgs/{org}/dismissal-requests/dependabot',
+      {
+        org,
+        request_status: 'open',
+        per_page: 100,
+        headers: { 'X-GitHub-Api-Version': API_VERSION },
+      }
     );
   } catch (error) {
-    if (error.status === 404) {
-      console.log('     Dependabot not enabled — skipping.');
+    if (error.status === 404 || error.status === 403) {
+      console.log(
+        `     Dependabot dismissal requests not available (HTTP ${error.status}) — skipping.`
+      );
       return;
     }
     throw error;
   }
 
-  const recent = alerts.filter(
-    (a) => a.dismissed_at && new Date(a.dismissed_at) > cutoffTime
-  );
-  console.log(
-    `     ${recent.length} dismissal(s) in the last ${POLLING_WINDOW_MINUTES} min.`
-  );
+  console.log(`     ${requests.length} open request(s) found.`);
 
-  for (const alert of recent) {
-    const result = validateDismissalComment(alert.dismissed_comment);
+  for (const req of requests) {
+    const repoFullName = req.repository.full_name;
+    const [owner, repo] = repoFullName.split('/');
+    // For Dependabot dismissal requests, resource_identifier is the alert
+    // number as a numeric string (unlike code scanning where it is "repo_id/alert").
+    const alertNumber = Number(req.resource_identifier);
+    const requester = req.requester?.actor_name;
+
+    const result = validateDismissalComment(req.requester_comment);
+
     if (result.valid) {
       console.log(
-        `     ✅ Alert #${alert.number} — valid comment, keeping dismissed.`
+        `     ✅ Request #${req.number} (${repoFullName} alert #${alertNumber}) — valid comment, leaving open for human review.`
       );
       continue;
     }
 
     console.log(
-      `     ❌ Alert #${alert.number} — DENIED: ${result.reason}`
+      `     ❌ Request #${req.number} (${repoFullName} alert #${alertNumber}) — DENIED: ${result.reason}`
     );
 
     if (!DRY_RUN) {
-      await octokit.rest.dependabot.updateAlert({
-        owner,
-        repo,
-        alert_number: alert.number,
-        state: 'open',
-      });
-      console.log(`     🔓 Re-opened alert #${alert.number}.`);
+      await denyDismissalRequest(owner, repo, 'dependabot', alertNumber, result.reason);
+      console.log(`     🚫 Denied dismissal request #${req.number}.`);
     } else {
-      console.log(`     [DRY RUN] Would re-open alert #${alert.number}.`);
+      console.log(`     [DRY RUN] Would deny dismissal request #${req.number}.`);
     }
 
     if (CREATE_DENIAL_ISSUES) {
       await createDenialIssue(owner, repo, {
         alertType: 'dependabot',
-        alertNumber: alert.number,
-        alertUrl: alert.html_url,
-        requester: alert.dismissed_by?.login,
+        alertNumber,
+        alertUrl: req.html_url,
+        requester,
         denialReason: result.reason,
       });
     }
@@ -474,30 +491,27 @@ async function main() {
   if (DRY_RUN) {
     console.log('⚠️  DRY RUN mode — no changes will be made.\n');
   }
+
+  const org = getOrg();
+
   console.log('Configuration:');
+  console.log(`  organization        : ${org}`);
   console.log(`  required_phrase     : "${REQUIRED_PHRASE}"`);
   console.log(`  deny_blank_comments : ${DENY_BLANK}`);
   console.log(`  case_sensitive      : ${CASE_SENSITIVE}`);
   console.log(`  alert_types         : ${ALERT_TYPES.join(', ')}`);
-  console.log(`  polling_window      : ${POLLING_WINDOW_MINUTES} min`);
   console.log(`  create_denial_issues: ${CREATE_DENIAL_ISSUES}`);
-  console.log(`  cutoff_time         : ${cutoffTime.toISOString()}`);
 
-  const repos = await getReposToCheck();
-  console.log(`\nMonitoring ${repos.length} repository/repositories…`);
+  console.log(`\nChecking open dismissal requests for org: ${org}…`);
 
-  for (const { owner, name: repo } of repos) {
-    console.log(`\n━━━ ${owner}/${repo} ━━━`);
-
-    if (ALERT_TYPES.includes('code_scanning')) {
-      await processCodeScanningAlerts(owner, repo);
-    }
-    if (ALERT_TYPES.includes('secret_scanning')) {
-      await processSecretScanningAlerts(owner, repo);
-    }
-    if (ALERT_TYPES.includes('dependabot')) {
-      await processDependabotAlerts(owner, repo);
-    }
+  if (ALERT_TYPES.includes('code_scanning')) {
+    await processCodeScanningRequests(org);
+  }
+  if (ALERT_TYPES.includes('secret_scanning')) {
+    await processSecretScanningRequests(org);
+  }
+  if (ALERT_TYPES.includes('dependabot')) {
+    await processDependabotRequests(org);
   }
 
   console.log('\n✅ Done.');
@@ -510,3 +524,4 @@ main().catch((error) => {
 
 // Export helpers for unit tests.
 module.exports = { validateDismissalComment, formatDenialMessage };
+

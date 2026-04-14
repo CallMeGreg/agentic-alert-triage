@@ -1,12 +1,13 @@
 # .github/workflows/alert-dismissal-check.yml
 #
-# Scheduled workflow that polls GitHub security alert APIs and automatically
-# re-opens (denies) any dismissal whose comment does not satisfy the criteria
-# defined in config.yml.
+# Scheduled workflow that polls GitHub's org-level alert dismissal request APIs
+# for pending requests and automatically denies any whose comment does not
+# satisfy the criteria defined in config.yml.
 #
+# Requires delegated alert dismissal to be enabled in the organization.
 # Authentication uses a GitHub App token so that all actions are attributed to
-# the App and not to a personal account.  The App must be installed in every
-# organization/repository it is expected to manage.
+# the App and not to a personal account.  The App must be installed in the
+# organization it is expected to manage.
 #
 # Required repository secrets:
 #   APP_ID          — Numeric GitHub App ID (e.g. 123456)
@@ -16,8 +17,7 @@ name: Alert Dismissal Review
 
 on:
   # Run on a schedule — default every 15 minutes.
-  # Adjust the cron expression to match your preferred polling interval and
-  # remember to update polling_window_minutes in config.yml accordingly.
+  # Adjust the cron expression to match your preferred polling interval.
   schedule:
     - cron: '*/15 * * * *'
 
