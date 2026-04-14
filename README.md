@@ -93,8 +93,11 @@ the reason directly in the dismissal request review.
 
    | Permission | Access |
    |---|---|
-   | Secret scanning alerts | Read-only | Required by secret scanning dismissal request endpoints |
+   | Code scanning alerts | Read-only |
+   | Dependabot alerts | Read-only |
+   | Secret scanning alerts | Read-only |
    | Contents | Read-only |
+   | Issues | Read & write |
    | Metadata | Read-only *(required)* |
 
 5. Under **Where can this GitHub App be installed?**, choose **Only on this

@@ -118,6 +118,8 @@ Template placeholders for `denial_message`:
 
 | Permission | Level | Used for |
 |---|---|---|
+| Code scanning alerts | Read-only | Required by code scanning dismissal request endpoints |
+| Dependabot alerts | Read-only | Required by Dependabot dismissal request endpoints |
 | Secret scanning alerts | Read-only | Required by secret scanning dismissal request endpoints |
 | Contents | Read-only | Read `config.yml` from the repository |
 | Issues | Read & write | Create denial notification issues |
