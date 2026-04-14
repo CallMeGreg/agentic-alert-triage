@@ -43,7 +43,8 @@ When denied, the dismissal request is rejected via GitHub's review API and a
 GitHub Issue is created in the affected repository explaining why the request
 was denied and @-mentioning the requester.
 
-> **Note**: This automation uses the [delegated alert dismissal](https://docs.github.com/en/enterprise-cloud@latest/code-security/securing-your-organization/managing-the-security-of-your-organization/delegating-responsibility-for-managing-security-alerts) APIs
+> [!NOTE]
+> This automation uses the [delegated alert dismissal](https://docs.github.com/en/enterprise-cloud@latest/code-security/securing-your-organization/managing-the-security-of-your-organization/delegating-responsibility-for-managing-security-alerts) APIs
 > (`/orgs/{org}/dismissal-requests/*`). Delegated alert dismissal must be
 > **enabled** in your GitHub organization before this automation can work.
 
