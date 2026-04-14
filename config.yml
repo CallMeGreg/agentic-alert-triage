@@ -42,19 +42,11 @@ alert_types:
 # organization: my-org
 
 # ---------------------------------------------------------------------------
-# DENIAL NOTIFICATIONS: Create a GitHub Issue for each denied dismissal?
-# ---------------------------------------------------------------------------
-create_denial_issues: true
-
-# Labels applied to denial notification issues (must already exist in the repo
-# where the issue is created — typically the repo the alert belongs to).
-denial_issue_labels:
-  - dismissal-denied
-
-# ---------------------------------------------------------------------------
 # DENIAL MESSAGE TEMPLATE
 # ---------------------------------------------------------------------------
-# Customize the body of the denial notification issue.
+# Customize the message sent via the dismissal request review API when a
+# request is denied.  The message appears directly in the dismissal request
+# review so the requester can see why their request was denied.
 # Available placeholders:
 #   {alert_type}      — e.g. "code scanning"
 #   {alert_number}    — numeric alert ID

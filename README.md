@@ -29,7 +29,7 @@ named, auditable identity rather than a personal access token.
                                 │  5. If invalid:                  │
                                 │     • Deny the request via       │
                                 │       the review endpoint        │
-                                │     • Create denial issue        │
+                                │       with a detailed message    │
                                 └──────────────────────────────────┘
 ```
 
@@ -39,9 +39,9 @@ A dismissal request is **denied** if the requester's comment is:
 * Does **not** contain the phrase `mitigating control`
   (configurable in `config.yml`)
 
-When denied, the dismissal request is rejected via GitHub's review API and a
-GitHub Issue is created in the affected repository explaining why the request
-was denied and @-mentioning the requester.
+When denied, the dismissal request is rejected via GitHub's review API with a
+detailed message explaining why the request was denied, so the requester can see
+the reason directly in the dismissal request review.
 
 > [!NOTE]
 > This automation uses the [delegated alert dismissal](https://docs.github.com/en/enterprise-cloud@latest/code-security/securing-your-organization/managing-the-security-of-your-organization/delegating-responsibility-for-managing-security-alerts) APIs
@@ -58,7 +58,6 @@ was denied and @-mentioning the requester.
 | **Delegated alert dismissal** | Must be enabled in the organization. See [GitHub docs](https://docs.github.com/en/enterprise-cloud@latest/code-security/securing-your-organization/managing-the-security-of-your-organization/delegating-responsibility-for-managing-security-alerts). |
 | **GitHub App** | Used for authentication. See [Create a GitHub App](#1-create-a-github-app) below. |
 | **Node.js ≥ 20** | Used by the automation script. Provided automatically by `actions/setup-node` in the workflow. |
-| **`dismissal-denied` label** | Must exist in every monitored repository before the workflow runs if `create_denial_issues: true` (default). See [Create the issue label](#4-create-the-issue-label). |
 
 ---
 
@@ -88,7 +87,6 @@ was denied and @-mentioning the requester.
    |---|---|
    | Secret scanning alerts | Read-only | Required by secret scanning dismissal request endpoints |
    | Contents | Read-only |
-   | Issues | Read & write |
    | Metadata | Read-only *(required)* |
 
 5. Under **Where can this GitHub App be installed?**, choose **Only on this
@@ -142,24 +140,7 @@ alert_types:
 
 ---
 
-### 4. Create the issue label
-
-The workflow creates a GitHub Issue for each denied request and applies the
-label `dismissal-denied` (configurable via `denial_issue_labels` in
-`config.yml`).
-
-Create the label in each monitored repository before the workflow runs:
-
-```bash
-gh label create "dismissal-denied" \
-  --description "Alert dismissal request was automatically denied" \
-  --color "B60205" \
-  --repo owner/repo
-```
-
----
-
-### 5. Adjust the schedule (optional)
+### 4. Adjust the schedule (optional)
 
 The workflow runs every **15 minutes** by default.  To change this, edit the
 `cron` expression in
@@ -213,7 +194,9 @@ node scripts/check-dismissals.js
 
 ## Customizing the denial message
 
-Set `denial_message` in `config.yml` using Markdown.  Available placeholders:
+Set `denial_message` in `config.yml` using Markdown.  The message is sent via
+the dismissal request review API so the requester can see why their request was
+denied.  Available placeholders:
 
 | Placeholder | Replaced with |
 |---|---|
@@ -247,5 +230,4 @@ Set `denial_message` in `config.yml` using Markdown.  Available placeholders:
 | Workflow fails with `Resource not accessible` | App not installed in the org, or missing permission | Install the App in the org and verify permissions |
 | No dismissal requests found | Delegated alert dismissal not enabled, or no pending requests | Enable delegated alert dismissal in org settings |
 | Alert type not checked | Alert type not in `alert_types`, or GHAS feature not enabled | Enable the feature in org/repo settings; check `config.yml` |
-| Denial issues not created | Label does not exist in the repo | Create the `dismissal-denied` label in the affected repo |
 | 404 on dismissal request endpoints | Delegated alert dismissal not enabled, or GitHub Advanced Security not enabled | Enable GHAS and delegated dismissal in organization settings |

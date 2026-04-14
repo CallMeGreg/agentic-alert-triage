@@ -45,10 +45,6 @@ const CASE_SENSITIVE = config.case_sensitive === true;
 const ALERT_TYPES = Array.isArray(config.alert_types)
   ? config.alert_types
   : ['code_scanning', 'secret_scanning', 'dependabot'];
-const CREATE_DENIAL_ISSUES = config.create_denial_issues !== false;
-const DENIAL_ISSUE_LABELS = Array.isArray(config.denial_issue_labels)
-  ? config.denial_issue_labels
-  : ['dismissal-denied'];
 const DRY_RUN = process.env.DRY_RUN === 'true';
 
 // All new dismissal request endpoints require this API version header.
@@ -175,67 +171,6 @@ function formatDenialMessage({
 }
 
 // ---------------------------------------------------------------------------
-// Denial notifications (GitHub Issues)
-// ---------------------------------------------------------------------------
-
-/**
- * Creates a GitHub Issue to notify the team about a denied dismissal request.
- *
- * @param {string} owner
- * @param {string} repo
- * @param {object} params
- */
-async function createDenialIssue(
-  owner,
-  repo,
-  { alertType, alertNumber, alertUrl, requester, denialReason }
-) {
-  const repoFullName = `${owner}/${repo}`;
-  const mentionLine = requester ? `@${requester} — ` : '';
-  const body =
-    mentionLine +
-    formatDenialMessage({
-      alertType,
-      alertNumber,
-      requester,
-      denialReason,
-      repoFullName,
-    }) +
-    `\n\n**Alert:** ${alertUrl}`;
-
-  const title = `🚫 Alert Dismissal Denied: ${alertType.replace(/_/g, ' ')} alert #${alertNumber}`;
-
-  if (DRY_RUN) {
-    console.log(
-      `     [DRY RUN] Would create issue: "${title}" in ${repoFullName}`
-    );
-    return;
-  }
-
-  try {
-    const { data: issue } = await octokit.rest.issues.create({
-      owner,
-      repo,
-      title,
-      body,
-      labels: DENIAL_ISSUE_LABELS,
-    });
-    console.log(
-      `     📝 Created denial notification issue #${issue.number}: ${issue.html_url}`
-    );
-  } catch (error) {
-    // Issues may be disabled in the repo — degrade gracefully.
-    if (error.status === 410 || error.status === 403 || error.status === 404) {
-      console.warn(
-        `     ⚠️  Could not create issue in ${repoFullName} (HTTP ${error.status}): ${error.message}`
-      );
-    } else {
-      throw error;
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Dismissal request review (deny)
 // ---------------------------------------------------------------------------
 
@@ -322,21 +257,19 @@ async function processCodeScanningRequests(org) {
       `     ❌ Request #${req.number} (${repoFullName} alert #${alertNumber}) — DENIED: ${result.reason}`
     );
 
+    const denialMessage = formatDenialMessage({
+      alertType: 'code_scanning',
+      alertNumber,
+      requester,
+      denialReason: result.reason,
+      repoFullName,
+    });
+
     if (!DRY_RUN) {
-      await denyDismissalRequest(owner, repo, 'code-scanning', alertNumber, result.reason);
+      await denyDismissalRequest(owner, repo, 'code-scanning', alertNumber, denialMessage);
       console.log(`     🚫 Denied dismissal request #${req.number}.`);
     } else {
       console.log(`     [DRY RUN] Would deny dismissal request #${req.number}.`);
-    }
-
-    if (CREATE_DENIAL_ISSUES) {
-      await createDenialIssue(owner, repo, {
-        alertType: 'code_scanning',
-        alertNumber,
-        alertUrl: req.html_url,
-        requester,
-        denialReason: result.reason,
-      });
     }
   }
 }
@@ -392,21 +325,19 @@ async function processSecretScanningRequests(org) {
       `     ❌ Request #${req.number} (${repoFullName} alert #${alertNumber}) — DENIED: ${result.reason}`
     );
 
+    const denialMessage = formatDenialMessage({
+      alertType: 'secret_scanning',
+      alertNumber,
+      requester,
+      denialReason: result.reason,
+      repoFullName,
+    });
+
     if (!DRY_RUN) {
-      await denyDismissalRequest(owner, repo, 'secret-scanning', alertNumber, result.reason);
+      await denyDismissalRequest(owner, repo, 'secret-scanning', alertNumber, denialMessage);
       console.log(`     🚫 Denied dismissal request #${req.number}.`);
     } else {
       console.log(`     [DRY RUN] Would deny dismissal request #${req.number}.`);
-    }
-
-    if (CREATE_DENIAL_ISSUES) {
-      await createDenialIssue(owner, repo, {
-        alertType: 'secret_scanning',
-        alertNumber,
-        alertUrl: req.html_url,
-        requester,
-        denialReason: result.reason,
-      });
     }
   }
 }
@@ -462,21 +393,19 @@ async function processDependabotRequests(org) {
       `     ❌ Request #${req.number} (${repoFullName} alert #${alertNumber}) — DENIED: ${result.reason}`
     );
 
+    const denialMessage = formatDenialMessage({
+      alertType: 'dependabot',
+      alertNumber,
+      requester,
+      denialReason: result.reason,
+      repoFullName,
+    });
+
     if (!DRY_RUN) {
-      await denyDismissalRequest(owner, repo, 'dependabot', alertNumber, result.reason);
+      await denyDismissalRequest(owner, repo, 'dependabot', alertNumber, denialMessage);
       console.log(`     🚫 Denied dismissal request #${req.number}.`);
     } else {
       console.log(`     [DRY RUN] Would deny dismissal request #${req.number}.`);
-    }
-
-    if (CREATE_DENIAL_ISSUES) {
-      await createDenialIssue(owner, repo, {
-        alertType: 'dependabot',
-        alertNumber,
-        alertUrl: req.html_url,
-        requester,
-        denialReason: result.reason,
-      });
     }
   }
 }
@@ -500,7 +429,6 @@ async function main() {
   console.log(`  deny_blank_comments : ${DENY_BLANK}`);
   console.log(`  case_sensitive      : ${CASE_SENSITIVE}`);
   console.log(`  alert_types         : ${ALERT_TYPES.join(', ')}`);
-  console.log(`  create_denial_issues: ${CREATE_DENIAL_ISSUES}`);
 
   console.log(`\nChecking open dismissal requests for org: ${org}…`);
 

@@ -27,7 +27,7 @@ on:
       dry_run:
         description: >
           Dry run — log what would change but make no API calls that modify
-          alert state or create issues.
+          alert state.
         required: false
         default: 'false'
         type: choice
