@@ -60,7 +60,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3.1.1
         with:
-          app-id: ${{ secrets.ALERT_DISMISSAL_APP_CLIENT_ID }}
+          client-id: ${{ secrets.ALERT_DISMISSAL_APP_CLIENT_ID }}
           private-key: ${{ secrets.ALERT_DISMISSAL_APP_PRIVATE_KEY }}
 
       # -----------------------------------------------------------------------
