@@ -53,7 +53,7 @@ was denied and @-mentioning the requester.
 
 | Requirement | Notes |
 |---|---|
-| **GitHub Advanced Security** | Required for code scanning and secret scanning. Dependabot works on all public repos and on private repos with a GitHub Advanced Security license. |
+| **GitHub Advanced Security** | Required for code scanning and secret scanning. |
 | **Delegated alert dismissal** | Must be enabled in the organization. See [GitHub docs](https://docs.github.com/en/enterprise-cloud@latest/code-security/securing-your-organization/managing-the-security-of-your-organization/delegating-responsibility-for-managing-security-alerts). |
 | **GitHub App** | Used for authentication. See [Create a GitHub App](#1-create-a-github-app) below. |
 | **Node.js ≥ 20** | Used by the automation script. Provided automatically by `actions/setup-node` in the workflow. |
