@@ -56,6 +56,9 @@ the reason directly in the dismissal request review.
 > (`/orgs/{org}/dismissal-requests/*`). Delegated alert dismissal must be
 > **enabled** in your GitHub organization before this automation can work.
 
+> [!WARNING]
+> Support for Dependabot dismissal requests is not currently functional. You can track progress and its resolution here: https://github.com/callmegreg-demo-org/alert-dismissal-automation/issues/9
+
 ---
 
 ## Prerequisites
