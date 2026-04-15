@@ -93,7 +93,9 @@ the reason directly in the dismissal request review.
 
    | Permission | Access |
    |---|---|
-   | Secret scanning alerts | Read-only | Required by secret scanning dismissal request endpoints |
+   | Code scanning alerts | Read-only |
+   | Dependabot alerts | Read-only |
+   | Secret scanning alerts | Read-only |
    | Contents | Read-only |
    | Metadata | Read-only *(required)* |
 
