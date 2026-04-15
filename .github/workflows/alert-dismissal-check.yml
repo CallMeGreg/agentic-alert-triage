@@ -34,6 +34,16 @@ on:
         options:
           - 'false'
           - 'true'
+      debug:
+        description: >
+          Enable verbose debug logging to troubleshoot API calls,
+          authentication, and response payloads.
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 # Minimal permissions for the built-in GITHUB_TOKEN.
 # The actual work is done with the GitHub App token generated below.
@@ -89,5 +99,6 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          DEBUG: ${{ github.event.inputs.debug || 'false' }}
           # Override the config file path when needed (optional).
           # CONFIG_PATH: config.yml
