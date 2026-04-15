@@ -65,9 +65,9 @@ alert_types:
 #   {repo_full_name}  — "owner/repo" of the monitored repository
 #
 # The default template is used when this key is absent or empty.
-# denial_message: |
-#   ## ⚠️ Alert Dismissal Request Denied
-#   Your request to dismiss this alert has been automatically denied.
-#   **Reason:** {denial_reason}
-#   Please re-submit with a comment that includes: `{required_phrase}`
+denial_message: |
+  ## ⚠️ Alert Dismissal Request Denied
+  Your request to dismiss this alert has been automatically denied.
+  **Reason:** {denial_reason}
+  Please create an issue using the following template and add the link to the dismissal request message: https://github.com/callmegreg-demo-org/app-xyz-repo/issues/new?template=foo.yml
 
