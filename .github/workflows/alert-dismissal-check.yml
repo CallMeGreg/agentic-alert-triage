@@ -72,6 +72,9 @@ jobs:
         with:
           client-id: ${{ secrets.ALERT_DISMISSAL_APP_CLIENT_ID }}
           private-key: ${{ secrets.ALERT_DISMISSAL_APP_PRIVATE_KEY }}
+          # Scope the token to the entire org so it can access dismissal
+          # requests across all repositories, not just the current one.
+          owner: ${{ github.repository_owner }}
 
       # -----------------------------------------------------------------------
       # 3. Set up the Node.js runtime.
