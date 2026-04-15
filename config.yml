@@ -18,7 +18,7 @@
 # A regular expression pattern the comment must match.  Uses JavaScript RegExp
 # syntax.  Honors the case_sensitive setting.  In YAML, use double backslashes
 # for literal backslash characters (e.g. "JIRA-\\d+" becomes the regex JIRA-\d+).
-required_pattern: "https://github\.com/callmegreg-demo-org/[a-zA-Z0-9._-]+/issues/\d+"
+required_pattern: "https://github\\.com/callmegreg-demo-org/[a-zA-Z0-9._-]+/issues/\\d+"
 
 # The minimum number of characters (after trimming whitespace) required in the
 # dismissal comment.
