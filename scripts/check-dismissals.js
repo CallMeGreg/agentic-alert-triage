@@ -50,9 +50,18 @@ const ALERT_TYPES = Array.isArray(config.alert_types)
   ? config.alert_types
   : ['code_scanning', 'secret_scanning', 'dependabot'];
 const DRY_RUN = process.env.DRY_RUN === 'true';
+const DEBUG = process.env.DEBUG === 'true';
 
 // All new dismissal request endpoints require this API version header.
 const API_VERSION = '2026-03-10';
+
+// ---------------------------------------------------------------------------
+// Debug helper
+// ---------------------------------------------------------------------------
+
+function debug(...args) {
+  if (DEBUG) console.log('[DEBUG]', ...args);
+}
 
 // Maximum length allowed by the dismissal request review API for the message body.
 const MAX_DENIAL_MESSAGE_LENGTH = 2048;
@@ -62,6 +71,55 @@ const MAX_DENIAL_MESSAGE_LENGTH = 2048;
 // ---------------------------------------------------------------------------
 
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+
+/**
+ * Log details about the authenticated token — scopes, identity, etc.
+ * Only runs when DEBUG=true.
+ */
+async function debugAuth() {
+  if (!DEBUG) return;
+
+  const token = process.env.GITHUB_TOKEN;
+  debug(`GITHUB_TOKEN present: ${!!token}`);
+  debug(`GITHUB_TOKEN length : ${token ? token.length : 0}`);
+  debug(`GITHUB_TOKEN prefix : ${token ? token.slice(0, 8) + '…' : '(none)'}`);
+  debug(`GITHUB_REPOSITORY   : ${process.env.GITHUB_REPOSITORY || '(not set)'}`);
+  debug(`DRY_RUN             : ${DRY_RUN}`);
+
+  try {
+    // Check who we are authenticated as
+    const { data, headers } = await octokit.request('GET /meta', {
+      headers: { 'X-GitHub-Api-Version': API_VERSION },
+    });
+    debug('GET /meta succeeded — API is reachable');
+    debug(`  x-github-request-id  : ${headers['x-github-request-id'] || '(none)'}`);
+    debug(`  x-oauth-scopes       : ${headers['x-oauth-scopes'] || '(none — likely app token)'}`);
+  } catch (e) {
+    debug(`GET /meta failed: ${e.status} ${e.message}`);
+  }
+
+  try {
+    const { data } = await octokit.request('GET /app', {
+      headers: { 'X-GitHub-Api-Version': API_VERSION },
+    });
+    debug(`Authenticated as GitHub App: "${data.name}" (id: ${data.id})`);
+  } catch (e) {
+    debug(`GET /app failed (may not be an app token): ${e.status} ${e.message}`);
+  }
+
+  try {
+    const { data } = await octokit.request('GET /installation/repositories', {
+      per_page: 5,
+      headers: { 'X-GitHub-Api-Version': API_VERSION },
+    });
+    debug(`Installation has access to ${data.total_count} repo(s). First few:`);
+    for (const r of data.repositories) {
+      debug(`  - ${r.full_name} (permissions: ${JSON.stringify(r.permissions)})`);
+    }
+  } catch (e) {
+    debug(`GET /installation/repositories failed: ${e.status} ${e.message}`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Organization resolution
@@ -234,17 +292,51 @@ async function denyDismissalRequest(owner, repo, alertType, alertNumber, message
 async function processCodeScanningRequests(org) {
   console.log(`\n  🔍 Code scanning dismissal requests…`);
 
+  const endpoint = 'GET /orgs/{org}/dismissal-requests/code-scanning';
+  const params = {
+    org,
+    request_status: 'open',
+    per_page: 100,
+    headers: { 'X-GitHub-Api-Version': API_VERSION },
+  };
+
+  debug(`Code scanning — endpoint: ${endpoint}`);
+  debug(`Code scanning — params: ${JSON.stringify({ org, request_status: 'open', per_page: 100, apiVersion: API_VERSION })}`);
+
   let requests;
   try {
-    requests = await octokit.paginate(
-      'GET /orgs/{org}/dismissal-requests/code-scanning',
-      {
-        org,
-        request_status: 'open',
-        per_page: 100,
-        headers: { 'X-GitHub-Api-Version': API_VERSION },
+    // When DEBUG is on, make a single non-paginated request first to inspect
+    // the raw response (status, headers, body structure).
+    if (DEBUG) {
+      try {
+        const raw = await octokit.request(endpoint, params);
+        debug(`Code scanning — raw response status: ${raw.status}`);
+        debug(`Code scanning — response headers:`);
+        debug(`  x-github-request-id : ${raw.headers['x-github-request-id'] || '(none)'}`);
+        debug(`  link                : ${raw.headers['link'] || '(none — no pagination)'}`);
+        debug(`  x-github-api-version-selected: ${raw.headers['x-github-api-version-selected'] || '(none)'}`);
+        debug(`Code scanning — raw data type: ${typeof raw.data}, isArray: ${Array.isArray(raw.data)}`);
+        debug(`Code scanning — raw data length: ${Array.isArray(raw.data) ? raw.data.length : 'N/A'}`);
+        if (Array.isArray(raw.data) && raw.data.length > 0) {
+          debug(`Code scanning — first item keys: ${Object.keys(raw.data[0]).join(', ')}`);
+          debug(`Code scanning — first item: ${JSON.stringify(raw.data[0], null, 2)}`);
+        } else if (raw.data && typeof raw.data === 'object' && !Array.isArray(raw.data)) {
+          debug(`Code scanning — response is object, not array. Keys: ${Object.keys(raw.data).join(', ')}`);
+          debug(`Code scanning — response body: ${JSON.stringify(raw.data, null, 2).slice(0, 2000)}`);
+        } else {
+          debug(`Code scanning — response body is empty or unexpected: ${JSON.stringify(raw.data)}`);
+        }
+      } catch (debugErr) {
+        debug(`Code scanning — raw request failed: ${debugErr.status} ${debugErr.message}`);
+        if (debugErr.response) {
+          debug(`Code scanning — error response body: ${JSON.stringify(debugErr.response.data)}`);
+          debug(`Code scanning — error response headers: ${JSON.stringify(debugErr.response.headers)}`);
+        }
       }
-    );
+    }
+
+    requests = await octokit.paginate(endpoint, params);
+    debug(`Code scanning — paginate returned ${requests.length} item(s)`);
   } catch (error) {
     if (error.status === 404 || error.status === 403) {
       console.log(
@@ -445,6 +537,11 @@ async function main() {
   if (DRY_RUN) {
     console.log('⚠️  DRY RUN mode — no changes will be made.\n');
   }
+  if (DEBUG) {
+    console.log('🐛 DEBUG mode enabled — verbose logging active.\n');
+  }
+
+  await debugAuth();
 
   const org = getOrg();
 
