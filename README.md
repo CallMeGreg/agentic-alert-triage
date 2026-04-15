@@ -97,7 +97,6 @@ the reason directly in the dismissal request review.
    | Dependabot alerts | Read-only |
    | Secret scanning alerts | Read-only |
    | Contents | Read-only |
-   | Issues | Read & write |
    | Metadata | Read-only *(required)* |
 
 5. Under **Where can this GitHub App be installed?**, choose **Only on this
