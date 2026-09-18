@@ -10,13 +10,14 @@ review, or both.
 | `agentic` | Send every created request to the central gh-aw workflow for contextual review. |
 | `both` | Deny deterministic failures immediately and dispatch passing requests for agentic review. |
 
-The agent never approves a dismissal request. A request judged ready remains
+> [!IMPORTANT]
+> The agent never approves a dismissal request. A request judged ready remains
 open and the alert is assigned to the configured AppSec team for final human
 review.
 
 ## Webhook ingress
 
-The App subscribes to the official GitHub webhook categories below and handles
+The App subscribes to the GitHub webhook categories below and handles
 only the `created` action:
 
 | Webhook event | Probot event | Required `exemption_request_data.type` |
@@ -25,35 +26,17 @@ only the `created` action:
 | `dismissal_request_dependabot` | `dismissal_request_dependabot.created` | `dependabot_alert_dismissal` |
 | `dismissal_request_secret_scanning` | `dismissal_request_secret_scanning.created` | `secret_scanning_closure` |
 
-See GitHub's
-[webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads)
-reference. All three alert types are enabled in [`config.yml`](config.yml) by
+All three alert types are enabled in [`config.yml`](config.yml) by
 default. Removing a type from `alert_types` makes the subscribed event a safe
 no-op.
 
-For each signed delivery, the handler:
-
-1. Validates the event/action, organization, repository and installation IDs,
-   dismissal request IDs, repository ID, requester, request data type, and up
-   to 100 positive unique alert numbers.
-2. Ignores opaque `metadata`, `responses`, and unknown request-data fields.
-3. Applies deterministic checks with the incoming installation Octokit when
-   configured.
-4. Resolves and caches the configured AppSec team's sanitized member logins
-   with the incoming installation Octokit.
-5. Resolves the GitHub App installation for the central control repository
-   using App authentication, obtains that installation Octokit, and creates one
-   `repository_dispatch` per unique alert number.
-
-The dismissal request is never re-fetched. The trusted snapshot comes directly
-from GitHub's signature-verified webhook payload.
-
 ## Agentic review flow
 
-The repository dispatch uses schema version 1 and is capped at 60,000
-characters. It contains only:
+When the app receives one of the dismissal request events, 
+a repository dispatch event is fired to trigger the agentic workflow.
+The dispatch event includes:
 
-- validated target organization, repository, repository ID, alert type, alert
+- validated target organization, repository, alert type, alert
   number, and dismissal request identifiers;
 - a bounded request snapshot with requester login, comment, request status,
   request data type, selected dismissal reasons, dates, and URL;
@@ -61,8 +44,7 @@ characters. It contains only:
 - bounded provenance: control repository, webhook event, incoming installation
   ID, and delivery ID when available.
 
-Token-shaped values and private keys are redacted from requester text. Alert
-content, secret values, opaque webhook fields, and agent instructions are not
+Alert content, secret values, opaque webhook fields, app private keys, and agent instructions are not
 included.
 
 The compiled workflow
@@ -77,12 +59,11 @@ It:
 2. Mints a fresh installation token for the monitored organization using the
    same GitHub App.
 3. Fetches only the current alert and up to five same-organization linked
-   issues with at most 20 comments each. It does not fetch current request
-   state.
+   issues with at most 20 comments each.
 4. Requests secret scanning alerts with `hide_secret=true` and removes
    sensitive patterns before writing local agent context.
 5. Skips inference when the webhook snapshot was not open/pending or the alert
-   is already assigned to AppSec.
+   is already assigned to the AppSec team members.
 6. Gives the model read-only local context, bounded shell access, no GitHub MCP,
    no edit/commit/PR output, and one custom SafeOutput:
    `apply_dismissal_decision`.
@@ -90,7 +71,7 @@ It:
    the decision with a new App installation token.
 
 Concurrency is grouped per repository, alert type, and alert number with
-`cancel-in-progress: true`. Denials are optimistic writes: known stale responses
+`cancel-in-progress: true` to avoid wasted token spend. Denials are optimistic writes: known stale responses
 from already completed, cancelled, expired, approved, or denied requests are
 safe no-ops. Assignment endpoint failures are not hidden.
 
@@ -100,11 +81,11 @@ safe no-ops. Assignment endpoint failures are not hidden.
   snapshotted AppSec members.
 - Secret scanning currently supports one alert assignee, selected
   deterministically from the team snapshot.
-- No per-user collaborator probes are made.
 
-The configured team is assumed to hold GitHub's organization
+> [IMPORTANT]
+> The configured team is assumed to hold GitHub's organization
 [Security Manager role](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-peoples-access-to-your-organization-with-roles/managing-security-managers-in-your-organization),
-which provides repository read access and permission to manage security alerts.
+which provides repository read access and permission to manage security alerts & dismissal requests.
 
 ## GitHub App installation and authentication
 
@@ -160,9 +141,6 @@ permissions by their display names rather than guessing new slugs.
 | Contents | Write | Create `repository_dispatch` on the control repository |
 | Issues | Read-only | Read bounded linked evidence, including private issues when installed |
 | Metadata | Read-only | Required GitHub App repository metadata |
-
-GitHub documents the permission required by each endpoint in
-[Permissions required for GitHub Apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps).
 
 ## Configure the service
 
@@ -258,7 +236,8 @@ npm install
 npm start
 ```
 
-See Probot's
+> [!TIP]
+> See Probot's
 [configuration](https://probot.github.io/docs/configuration/) and
 [deployment](https://probot.github.io/docs/deployment/) guides.
 
