@@ -51,25 +51,41 @@ function loadConfig(configPath = process.env.CONFIG_PATH || path.join(process.cw
   return yaml.load(fs.readFileSync(configPath, 'utf8')) || {};
 }
 
-function getOrganization(config, env = process.env) {
-  const organization =
-    config.organization ||
-    (env.GITHUB_REPOSITORY ? env.GITHUB_REPOSITORY.split('/')[0] : null);
-
-  if (!organization) {
-    throw new Error(
-      'Cannot determine organization. Set "organization" in config.yml or GITHUB_REPOSITORY.'
-    );
+function getEnterpriseSlug(value) {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/.test(value)
+  ) {
+    throw new Error('Invalid GitHub enterprise slug.');
   }
-
-  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(organization)) {
-    throw new Error(`Invalid GitHub organization name "${organization}".`);
-  }
-
-  return organization;
+  return value;
 }
 
-function getAgenticSettings(config, env = process.env) {
+function getEnterpriseTeamSlug(value) {
+  if (
+    typeof value !== 'string' ||
+    !/^ent:[A-Za-z0-9][A-Za-z0-9-]{0,99}$/.test(value)
+  ) {
+    throw new Error(
+      'Invalid AppSec enterprise team slug. Expected ent:team-name.'
+    );
+  }
+  return value;
+}
+
+function validateEnterpriseApp(appInfo, enterprise) {
+  if (
+    typeof appInfo?.owner?.slug !== 'string' ||
+    appInfo.owner.login != null ||
+    appInfo.owner.slug.toLowerCase() !== enterprise.toLowerCase()
+  ) {
+    throw new Error(
+      `This service requires a GitHub App owned by enterprise ${enterprise}.`
+    );
+  }
+}
+
+function getAgenticSettings(config) {
   const reviewMode = config.review_mode || 'deterministic';
   if (!['deterministic', 'agentic', 'both'].includes(reviewMode)) {
     throw new Error(
@@ -77,37 +93,30 @@ function getAgenticSettings(config, env = process.env) {
     );
   }
 
+  if (Object.hasOwn(config, 'organization')) {
+    throw new Error(
+      'organization is no longer supported. Configure enterprise instead.'
+    );
+  }
+  const enterprise = getEnterpriseSlug(config.enterprise);
   const agentic = config.agentic || {};
-  const organization =
-    (config.organization || env.GITHUB_REPOSITORY)
-      ? getOrganization(config, env)
-      : null;
-  const teamSlug = agentic.appsec_team_slug || 'appsec-team';
+  const teamSlug = getEnterpriseTeamSlug(
+    agentic.appsec_team_slug === undefined
+      ? 'ent:appsec-team'
+      : agentic.appsec_team_slug
+  );
   const workflowRepository =
     agentic.workflow_repository || DEFAULT_WORKFLOW_REPOSITORY;
 
-  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/.test(teamSlug)) {
-    throw new Error(`Invalid AppSec team slug "${teamSlug}".`);
-  }
   splitRepository(workflowRepository);
-
-  if (reviewMode === 'agentic' || reviewMode === 'both') {
-    if (!organization) {
-      throw new Error(
-        'Agentic review requires organization or GITHUB_REPOSITORY.'
-      );
-    }
-  }
 
   return {
     reviewMode,
-    organization,
+    enterprise,
     teamSlug,
     workflowRepository,
     staged: agentic.staged !== false,
-    helpContact:
-      agentic.help_contact ||
-      (organization ? `@${organization}/${teamSlug}` : `@${teamSlug}`),
+    helpContact: agentic.help_contact || `@/${teamSlug}`,
     denialMessage: agentic.denial_message || null,
   };
 }
@@ -146,8 +155,10 @@ function normalizeTeamLogins(teamLogins) {
   }
 
   const uniqueLogins = new Map();
-  for (const value of teamLogins) {
-    const login = String(value);
+  for (const login of teamLogins) {
+    if (typeof login !== 'string') {
+      throw new Error('AppSec team member logins must be strings.');
+    }
     uniqueLogins.set(login.toLowerCase(), login);
   }
   const normalized = [...uniqueLogins.values()];
@@ -185,6 +196,7 @@ function normalizeDeliveryId(value) {
 
 function buildDispatchPayload({
   organization,
+  enterprise,
   sourceRepository,
   repository,
   repositoryId,
@@ -192,6 +204,7 @@ function buildDispatchPayload({
   alertNumber,
   dismissalRequest,
   teamLogins,
+  teamSlug,
   webhookEvent,
   deliveryId = null,
   installationId,
@@ -268,12 +281,14 @@ function buildDispatchPayload({
     },
     request,
     review: {
+      appsec_team_slug: getEnterpriseTeamSlug(teamSlug),
       appsec_team_members: normalizedTeamLogins,
     },
     source: {
       repository: `${source.owner}/${source.repo}`,
       webhook_event: webhookEvent,
       installation_id: normalizedInstallationId,
+      enterprise: getEnterpriseSlug(enterprise),
     },
     dry_run: dryRun,
   };
@@ -316,14 +331,16 @@ async function getAlert(octokit, owner, repo, alertType, alertNumber) {
   return response.data;
 }
 
-async function listTeamMembers(octokit, organization, teamSlug) {
-  return octokit.paginate('GET /orgs/{org}/teams/{team_slug}/members', {
-    org: organization,
-    team_slug: teamSlug,
-    role: 'all',
-    per_page: 100,
-    headers: { 'X-GitHub-Api-Version': API_VERSION },
-  });
+async function listEnterpriseTeamMembers(octokit, enterprise, teamSlug) {
+  return octokit.paginate(
+    'GET /enterprises/{enterprise}/teams/{enterprise-team}/memberships',
+    {
+      enterprise: getEnterpriseSlug(enterprise),
+      'enterprise-team': getEnterpriseTeamSlug(teamSlug),
+      per_page: 100,
+      headers: { 'X-GitHub-Api-Version': API_VERSION },
+    }
+  );
 }
 
 function getAssignedLogins(alertType, alert) {
@@ -378,7 +395,7 @@ async function assignAlertToTeam({
   octokit,
   owner,
   repo,
-  organization,
+  enterprise,
   teamSlug,
   alertType,
   alertNumber,
@@ -386,15 +403,18 @@ async function assignAlertToTeam({
   teamMembers,
   dryRun = false,
 }) {
-  const members =
-    teamMembers || (await listTeamMembers(octokit, organization, teamSlug));
+  if (!Array.isArray(teamMembers)) {
+    throw new Error('An AppSec enterprise team membership snapshot is required.');
+  }
   const teamLogins = normalizeTeamLogins(
-    members.map((member) =>
-      typeof member === 'string' ? member : member.login
+    teamMembers.map((member) =>
+      typeof member === 'string' ? member : member?.login
     )
   );
   if (teamLogins.length === 0) {
-    throw new Error(`The @${organization}/${teamSlug} team has no members.`);
+    throw new Error(
+      `The ${enterprise}/${teamSlug} enterprise team has no members.`
+    );
   }
 
   if (alertType === 'secret_scanning') {
@@ -720,7 +740,7 @@ function readDispatchEvent(eventPath = process.env.GITHUB_EVENT_PATH) {
 }
 
 function validateDispatchEvent(event, config, env = process.env) {
-  const settings = getAgenticSettings(config, env);
+  const settings = getAgenticSettings(config);
   if (settings.reviewMode !== 'agentic' && settings.reviewMode !== 'both') {
     throw new Error(
       'Agentic review is disabled. Set review_mode to agentic or both.'
@@ -754,17 +774,12 @@ function validateDispatchEvent(event, config, env = process.env) {
     throw new Error('Dispatch payload contains an invalid organization.');
   }
 
-  if (
-    dispatchedTarget.organization.toLowerCase() !==
-    settings.organization.toLowerCase()
-  ) {
+  if (!env.EXPECTED_DISPATCH_SENDER) {
     throw new Error(
-      `Dispatch organization ${dispatchedTarget.organization} does not match configured organization ${settings.organization}.`
+      'EXPECTED_DISPATCH_SENDER is required to validate the GitHub App identity.'
     );
   }
-
   if (
-    env.EXPECTED_DISPATCH_SENDER &&
     event.sender?.login?.toLowerCase() !==
       env.EXPECTED_DISPATCH_SENDER.toLowerCase()
   ) {
@@ -774,9 +789,9 @@ function validateDispatchEvent(event, config, env = process.env) {
   }
 
   const { owner, repo } = splitRepository(dispatchedTarget.repository);
-  if (owner.toLowerCase() !== settings.organization.toLowerCase()) {
+  if (owner.toLowerCase() !== dispatchedTarget.organization.toLowerCase()) {
     throw new Error(
-      `Dispatch target ${dispatchedTarget.repository} is outside configured organization ${settings.organization}.`
+      `Dispatch target ${dispatchedTarget.repository} is outside target organization ${dispatchedTarget.organization}.`
     );
   }
 
@@ -836,6 +851,15 @@ function validateDispatchEvent(event, config, env = process.env) {
     );
   }
 
+  if (
+    typeof payload.review?.appsec_team_slug !== 'string' ||
+    payload.review.appsec_team_slug.toLowerCase() !==
+      settings.teamSlug.toLowerCase()
+  ) {
+    throw new Error(
+      'Dispatch AppSec enterprise team does not match the configured team.'
+    );
+  }
   const teamLogins = normalizeTeamLogins(
     payload.review?.appsec_team_members
   );
@@ -855,6 +879,14 @@ function validateDispatchEvent(event, config, env = process.env) {
   }
 
   const source = payload.source || {};
+  if (
+    typeof source.enterprise !== 'string' ||
+    source.enterprise.toLowerCase() !== settings.enterprise.toLowerCase()
+  ) {
+    throw new Error(
+      'Dispatch source enterprise does not match configured enterprise.'
+    );
+  }
   if (
     typeof source.repository !== 'string' ||
     source.repository.toLowerCase() !==
@@ -881,10 +913,22 @@ function validateDispatchEvent(event, config, env = process.env) {
     source.installation_id,
     'source installation ID'
   );
+  if (
+    env.EXPECTED_INSTALLATION_ID &&
+    sourceInstallationId !== normalizePositiveInteger(
+      env.EXPECTED_INSTALLATION_ID,
+      'workflow installation ID'
+    )
+  ) {
+    throw new Error(
+      'Workflow token installation does not match the webhook installation.'
+    );
+  }
   const deliveryId = normalizeDeliveryId(source.delivery_id);
 
   return {
     ...settings,
+    organization: dispatchedTarget.organization,
     payload,
     owner,
     repo,
@@ -917,6 +961,7 @@ function buildReviewContext({
   return {
     schema_version: 1,
     target: {
+      enterprise: target.enterprise,
       organization: target.organization,
       repository: target.repository,
       alert_type: target.alertType,
@@ -1074,10 +1119,9 @@ module.exports = {
   getAgenticSettings,
   getAlert,
   getAssignedLogins,
-  getOrganization,
   isAssignedToTeam,
   isOpenDismissalRequest,
-  listTeamMembers,
+  listEnterpriseTeamMembers,
   loadConfig,
   mergeAssignees,
   normalizeTeamLogins,
@@ -1091,4 +1135,5 @@ module.exports = {
   splitRepository,
   isStaleDismissalReviewError,
   validateDispatchEvent,
+  validateEnterpriseApp,
 };

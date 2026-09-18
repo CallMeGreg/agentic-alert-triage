@@ -1,5 +1,12 @@
 # GitHub App manifest used by Probot's local setup flow.
 # Updating this file does not update an existing GitHub App registration.
+# Register this App under the enterprise or transfer the private App to it.
+# Enterprise-owned Apps have
+# internal visibility; public: false alone only allows the owning account.
+# Also configure the enterprise-level "Enterprise teams" permission to Read
+# in the enterprise App settings UI and install the App on the enterprise.
+# The manifest below covers organization/repository permissions and events.
+# See README.md for enterprise setup; organization-owned Apps are rejected.
 
 name: Agentic Alert Triage
 url: https://github.com/CallMeGreg/agentic-alert-triage
@@ -14,7 +21,6 @@ default_events:
 default_permissions:
   contents: write
   issues: read
-  members: read
   metadata: read
   organization_code_scanning_dismissal_requests: write
   organization_dependabot_dismissal_requests: write

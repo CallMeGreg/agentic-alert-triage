@@ -1,8 +1,8 @@
 # Alert dismissal triage configuration
 
-# Trusted organization whose signed dismissal-request webhooks are accepted.
-# Set this explicitly when the control repository has a different owner.
-organization: callmegreg-demo-org
+# Required enterprise URL slug. The App must be owned by this enterprise.
+# organization is not supported. No organization allowlist is needed.
+enterprise: your-enterprise
 
 # deterministic: deny comments that fail the configured criteria.
 # agentic: dispatch every created request to the gh-aw workflow.
@@ -11,7 +11,8 @@ review_mode: deterministic
 
 # Optional deterministic criteria. If all are omitted, every comment passes.
 # required_phrase: "mitigating control"
-required_pattern: "https://github\\.com/callmegreg-demo-org/[a-zA-Z0-9._-]+/issues/\\d+"
+# URL-format check only; agentic evidence remains restricted to the target org.
+required_pattern: "https://github\\.com/[a-zA-Z0-9-]+/[a-zA-Z0-9._-]+/issues/\\d+"
 # minimum_length: 20
 case_sensitive: false
 
@@ -26,16 +27,19 @@ agentic:
   # Central repository containing the compiled agentic workflow. The GitHub
   # App must also be installed on this repository (or its owner) with
   # Contents: write so it can create repository_dispatch events.
-  workflow_repository: CallMeGreg/agentic-alert-triage
+  # Replace this example with a repository in your enterprise.
+  workflow_repository: your-security-org/alert-triage
 
-  # This team is assumed to hold GitHub's organization Security Manager role.
-  appsec_team_slug: appsec-team
+  # One enterprise team, assumed to hold the enterprise Security Manager role.
+  # Use the full enterprise team slug, including GitHub's ent: prefix.
+  # The App needs an enterprise installation with Enterprise teams: read.
+  appsec_team_slug: ent:appsec-team
 
   # Preview SafeOutput decisions until the workflow has been evaluated.
   staged: true
 
-  # Defaults to "@<organization>/<appsec_team_slug>" when omitted.
-  # help_contact: "@callmegreg-demo-org/appsec-team"
+  # Defaults to "@/<appsec_team_slug>" when omitted.
+  # help_contact: "@/ent:appsec-team"
 
   # Optional denial template. Available placeholders:
   # {requester}, {denial_reason}, {help_contact}, {alert_type},
@@ -47,6 +51,8 @@ agentic:
 # Short-lived, bounded process-local caches reduce duplicate webhook work and
 # GitHub API calls. They are not a durable queue or cross-replica lock.
 cache:
+  app_identity_ttl_seconds: 600
+  enterprise_installation_ttl_seconds: 600
   team_members_ttl_seconds: 300
   control_installation_ttl_seconds: 600
   delivery_dedupe_ttl_seconds: 900
@@ -59,4 +65,4 @@ denial_message: |
   Alert Dismissal Request Denied
   Your request to dismiss this alert has been automatically denied.
   Reason: {denial_reason}
-  Please create an issue using the following template and add the link to the dismissal request message: https://github.com/callmegreg-demo-org/app-xyz-repo/issues/new?template=foo.yml
+  Please create a supporting issue and add its link to the dismissal request message: https://github.com/{repo_full_name}/issues/new
