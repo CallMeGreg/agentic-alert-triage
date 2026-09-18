@@ -167,11 +167,26 @@ describe('agentic configuration', () => {
 
   it('requires the App to be owned by the configured enterprise, not a same-named org', () => {
     validateEnterpriseApp({ owner: { slug: 'OCTO-ENTERPRISE' } }, 'octo-enterprise');
+    validateEnterpriseApp(
+      { owner: { login: 'OCTO-ENTERPRISE', type: 'enterprise' } },
+      'octo-enterprise'
+    );
+    validateEnterpriseApp(
+      { owner: { login: 'octo-enterprise', type: 'Enterprise' } },
+      'octo-enterprise'
+    );
     for (const owner of [
       null,
       { slug: 'other-enterprise' },
       { login: 'octo-enterprise', type: 'Organization' },
+      { login: 'octo-enterprise' },
+      { login: 'other-enterprise', type: 'enterprise' },
       { login: 'octo-enterprise', slug: 'octo-enterprise' },
+      {
+        login: 'octo-enterprise',
+        slug: 'other-enterprise',
+        type: 'enterprise',
+      },
     ]) {
       assert.throws(
         () => validateEnterpriseApp({ owner }, 'octo-enterprise'),
@@ -882,13 +897,13 @@ describe('alert handling', () => {
     }), /enterprise team membership snapshot is required/);
   });
 
-  it('paginates the enterprise team memberships endpoint without organization parameters', async () => {
+  it('paginates the enterprise team memberships endpoint using the bare API slug', async () => {
     const members = [{ login: 'security-one' }, { login: 'security-two' }];
     const octokit = {
       paginate: async (endpoint, parameters) => {
         assert.equal(endpoint, 'GET /enterprises/{enterprise}/teams/{enterprise-team}/memberships');
         assert.equal(parameters.enterprise, 'octo-enterprise');
-        assert.equal(parameters['enterprise-team'], 'ent:appsec-team');
+        assert.equal(parameters['enterprise-team'], 'appsec-team');
         assert.equal(parameters.per_page, 100);
         assert.equal(Object.hasOwn(parameters, 'org'), false);
         assert.equal(Object.hasOwn(parameters, 'role'), false);

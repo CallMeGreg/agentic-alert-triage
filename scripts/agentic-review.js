@@ -74,11 +74,26 @@ function getEnterpriseTeamSlug(value) {
 }
 
 function validateEnterpriseApp(appInfo, enterprise) {
-  if (
-    typeof appInfo?.owner?.slug !== 'string' ||
-    appInfo.owner.login != null ||
-    appInfo.owner.slug.toLowerCase() !== enterprise.toLowerCase()
-  ) {
+  const owner = appInfo?.owner;
+  const expectedEnterprise = enterprise.toLowerCase();
+  const slugMatches =
+    typeof owner?.slug === 'string' &&
+    owner.slug.toLowerCase() === expectedEnterprise;
+  const loginMatches =
+    typeof owner?.login === 'string' &&
+    owner.login.toLowerCase() === expectedEnterprise;
+  const ownerType =
+    typeof owner?.type === 'string' ? owner.type.toLowerCase() : null;
+  const legacyEnterpriseOwner =
+    slugMatches &&
+    owner.login == null &&
+    (ownerType === null || ownerType === 'enterprise');
+  const currentEnterpriseOwner =
+    loginMatches &&
+    ownerType === 'enterprise' &&
+    (owner.slug == null || slugMatches);
+
+  if (!legacyEnterpriseOwner && !currentEnterpriseOwner) {
     throw new Error(
       `This service requires a GitHub App owned by enterprise ${enterprise}.`
     );
@@ -351,11 +366,12 @@ async function getAlert(octokit, owner, repo, alertType, alertNumber) {
 }
 
 async function listEnterpriseTeamMembers(octokit, enterprise, teamSlug) {
+  const enterpriseTeam = getEnterpriseTeamSlug(teamSlug).slice('ent:'.length);
   return octokit.paginate(
     'GET /enterprises/{enterprise}/teams/{enterprise-team}/memberships',
     {
       enterprise: getEnterpriseSlug(enterprise),
-      'enterprise-team': getEnterpriseTeamSlug(teamSlug),
+      'enterprise-team': enterpriseTeam,
       per_page: 100,
       headers: { 'X-GitHub-Api-Version': API_VERSION },
     }
