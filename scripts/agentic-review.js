@@ -998,7 +998,7 @@ function appendNoop(message, safeOutputsPath = process.env.GH_AW_SAFE_OUTPUTS) {
 function sanitizeAgentReason(reason) {
   const normalized = String(reason || '')
     .replace(/\0/g, '')
-    .replace(/<[^>\n]*>/g, '')
+    .replace(/[<>]/g, '')
     .replace(/!?\[([^\]]*)\]\([^)]+\)/g, '$1')
     .replace(/\bhttps?:\/\/\S+/gi, '[link omitted]')
     .replace(/@/g, '@\u200b')
