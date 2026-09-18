@@ -31,27 +31,30 @@ The existing scheduled workflow remains the discovery mechanism:
 4. For agentic processing, send an `alert-dismissal-requested`
    `repository_dispatch` event to the automation repository.
 
-The dispatch payload contains only trusted identifiers. It deliberately does
-not include the requester comment or alert content.
+The dispatch payload contains a sanitized snapshot of the open dismissal
+request and the current AppSec team membership. It does not contain alert
+content or secret values.
 
 The compiled agentic workflow then:
 
 1. Validates the dispatch payload against `config.yml`.
 2. Resolves the monitored organization from trusted `config.yml`, then mints a
    fresh GitHub App installation token in a deterministic pre-agent step.
-3. Fetches the exact dismissal request and alert that triggered the event.
-4. Redacts secret values and fetches a bounded set of same-organization GitHub
+3. Uses the dispatched request snapshot and fetches the current alert that
+   triggered the event.
+4. Hides secret values and fetches a bounded set of same-organization GitHub
    issues linked from the request comment.
-5. Skips inference when the request is no longer open or the alert is already
-   assigned to AppSec.
+5. Skips inference when the dispatched request was not open or the alert is
+   already assigned to AppSec.
 6. Gives the agent only the sanitized local context and one bounded SafeOutput.
 7. Runs gh-aw threat detection before applying the requested action.
-8. Re-fetches current state in the SafeOutput job before making a change.
+8. Applies an optimistic denial directly or fetches the current alert only
+   when needed to preserve existing assignees.
 
 The agent can make only one of two decisions:
 
 - **Ready for human review:** leave the dismissal request open and assign the
-  alert to eligible members of the configured AppSec team.
+  alert to members of the configured AppSec team.
 - **Deny:** deny the dismissal request with a concise reason, guidance about
   what supporting detail is needed, and an AppSec contact.
 
@@ -61,12 +64,22 @@ The agent never approves a dismissal request.
 
 The default team slug is `appsec-team` and is configurable.
 
-- Code scanning and Dependabot alerts are assigned to all team members who
-  have write access to the repository. Existing assignees are preserved.
+- Code scanning and Dependabot alerts are assigned to all snapshotted AppSec
+  team members. Existing assignees are preserved.
 - The secret scanning REST API currently supports one assignee. The automation
-  selects one eligible team member deterministically from the configured team.
-- Team members without repository write access are reported in the workflow
-  summary and are not assigned.
+  selects one team member deterministically from the configured team.
+- The automation intentionally does not make per-user collaborator permission
+  requests before assignment.
+
+### AppSec access assumption
+
+The configured AppSec team is assumed to have GitHub's **security manager**
+organization role. That role gives the team read access to every repository and
+write access to security alerts across the organization. Team membership is
+resolved once by the poller and included in the App-authenticated dispatch
+snapshot, avoiding team and collaborator lookups in each agentic workflow run.
+See
+[Managing security managers in your organization](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-peoples-access-to-your-organization-with-roles/managing-security-managers-in-your-organization).
 
 ## Agentic workflow safety controls
 
@@ -92,11 +105,13 @@ The workflow follows the
 - Threat detection gates the SafeOutput.
 - Dispatch payloads and SafeOutput targets are validated against trusted
   configuration rather than agent-provided owner, repository, or alert IDs.
+- Request comments in the dispatch snapshot are redacted, bounded, and treated
+  as untrusted evidence.
 - Secret scanning values are removed before context is written.
 - Requester text and linked issue content are explicitly treated as untrusted
   evidence.
-- Concurrency, turn, timeout, per-run AI credit, and daily AI credit limits are
-  configured.
+- Concurrency, turn, timeout, and per-run AI credit limits are configured. The
+  daily AI credit limit is explicitly disabled.
 - Staged mode is enabled in `config.yml` by default.
 
 Do not edit the generated `.lock.yml` directly. Edit the Markdown source and
@@ -109,6 +124,7 @@ recompile it.
 | GitHub Advanced Security products | Required for the alert types being monitored. |
 | Delegated alert dismissal | Must be enabled in the organization. |
 | GitHub App | Used for discovery, dispatch, request review, team lookup, and alert assignment. |
+| AppSec security manager team | The configured team must have the organization security manager role. |
 | Copilot inference access | The agentic workflow uses `copilot-requests: write` on its built-in Actions token. |
 | Node.js 20 or newer | Local development; workflows currently use Node.js 24. |
 | `gh-aw` CLI | Required only when editing or recompiling the agentic workflow. |
@@ -135,7 +151,7 @@ review modes.
 | Dependabot alerts | Read-only | Read & write | Read alert context and assign Dependabot alerts |
 | Secret scanning alerts | Read-only | Read & write | Read sanitized alert context and assign secret scanning alerts |
 | Contents | Not required | Read & write | Emit `repository_dispatch` |
-| Metadata | Read-only | Read-only | Required by GitHub Apps and used for collaborator permission checks |
+| Metadata | Read-only | Read-only | Required by all GitHub Apps |
 | Issues | Not required | Read-only when linked evidence is private | Read same-organization issues linked from dismissal comments |
 
 `repository_dispatch` requires `Contents: write`, and the configured workflow
@@ -145,8 +161,10 @@ permissions apply to every repository in that installation, so review this
 permission carefully. For tighter isolation, use a dedicated automation App or
 host the dispatch receiver in a narrowly scoped automation repository.
 
-The AppSec team members must have write access to a repository before GitHub
-allows them to be assigned to its alerts.
+The automation assumes the AppSec team has the security manager role and does
+not probe individual repository collaborator permissions before assignment.
+GitHub's alert assignment endpoint remains authoritative and any rejected
+assignment is surfaced as a workflow failure.
 
 ## Setup
 
@@ -257,19 +275,44 @@ export GH_TOKEN=<github-app-installation-token>
 
 gh api repos/my-org/alert-dismissal-automation/dispatches \
   --method POST \
-  -f event_type=alert-dismissal-requested \
-  -F 'client_payload[schema_version]=1' \
-  -f 'client_payload[organization]=my-org' \
-  -f 'client_payload[source_repository]=my-org/alert-dismissal-automation' \
-  -f 'client_payload[repository]=my-org/service-repo' \
-  -f 'client_payload[alert_type]=code_scanning' \
-  -F 'client_payload[alert_number]=42' \
-  -F 'client_payload[dismissal_request_id]=1234' \
-  -F 'client_payload[dismissal_request_number]=7' \
-  -F 'client_payload[dry_run]=true'
+  --input - <<'JSON'
+{
+  "event_type": "alert-dismissal-requested",
+  "client_payload": {
+    "schema_version": 2,
+    "target": {
+      "organization": "my-org",
+      "repository": "my-org/service-repo",
+      "alert_type": "code_scanning",
+      "alert_number": 42,
+      "dismissal_request_id": 1234,
+      "dismissal_request_number": 7
+    },
+    "request": {
+      "id": 1234,
+      "number": 7,
+      "status": "open",
+      "request_type": "dismiss",
+      "requester": { "actor_name": "octocat" },
+      "requester_comment": "Test-only finding; evidence is linked here.",
+      "dismissal_reasons": ["tests"],
+      "created_at": "2026-09-18T15:00:00Z"
+    },
+    "review": {
+      "appsec_team_members": ["security-reviewer-1", "security-reviewer-2"]
+    },
+    "source": {
+      "repository": "my-org/alert-dismissal-automation",
+      "run_id": "123456"
+    },
+    "dry_run": true
+  }
+}
+JSON
 ```
 
-The IDs must match the live request fetched by the workflow.
+The request snapshot IDs must match the target IDs. Production dispatches are
+built directly from the org-level open-request listing response.
 
 ## Development
 
@@ -279,9 +322,10 @@ npm test
 npm run compile:agentic
 ```
 
-The test suite covers deterministic validation, dispatch payload minimization,
+The test suite covers deterministic validation, sanitized dispatch snapshots,
 event validation, secret redaction, evidence URL filtering, assignment
-selection, mention neutralization, and denial formatting.
+selection, mention neutralization, optimistic stale-request handling, and
+denial formatting.
 
 ## Configuration reference
 
@@ -345,9 +389,10 @@ Agentic denial placeholders are `{requester}`, `{denial_reason}`,
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | No agentic workflow run appears | `review_mode` is deterministic, dry run is enabled, or the dispatch token lacks `Contents: write` | Check configuration and App permissions |
-| Agent job exits before inference | Request was already handled or the alert is already assigned to AppSec | Review the workflow summary; this is an idempotency safeguard |
+| Agent job exits before inference | The dispatched snapshot was not open or the alert is already assigned to AppSec | Review the workflow summary; this is an idempotency safeguard |
 | Team lookup fails | App lacks `Members: read`, the slug is wrong, or the team is not visible to the App | Update App permissions and `appsec_team_slug` |
-| Ready decision fails to assign | No team member has write access to the target repository | Grant eligible members write access |
+| Ready decision fails to assign | The AppSec team lacks the security manager role or GitHub rejected an assignee | Verify the team role and alert assignment eligibility |
+| Optimistic denial becomes a no-op | A human completed or removed the request while the agent was running | No action is required; the workflow summary records the stale result |
 | Workflow only previews changes | `agentic.staged` is still `true` or dispatch payload has `dry_run: true` | Disable staged mode only after validation |
 | Copilot inference fails | Organization does not permit `copilot-requests: write` | Confirm Copilot entitlement and Actions policy |
 | Lockfile is stale | Markdown source changed without recompilation | Run `npm run compile:agentic` and commit the lockfile |

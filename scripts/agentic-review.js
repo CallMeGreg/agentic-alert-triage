@@ -6,7 +6,8 @@ const yaml = require('js-yaml');
 
 const API_VERSION = '2026-03-10';
 const DISPATCH_EVENT_TYPE = 'alert-dismissal-requested';
-const DISPATCH_SCHEMA_VERSION = 1;
+const DISPATCH_SCHEMA_VERSION = 2;
+const MAX_DISPATCH_PAYLOAD_LENGTH = 60000;
 const MAX_DENIAL_MESSAGE_LENGTH = 2048;
 const MAX_AGENT_REASON_LENGTH = 1200;
 const MAX_EVIDENCE_ISSUES = 5;
@@ -150,6 +151,25 @@ function isOpenDismissalRequest(request) {
   return ['open', 'pending'].includes(String(request?.status || '').toLowerCase());
 }
 
+function normalizeTeamLogins(teamLogins) {
+  if (!Array.isArray(teamLogins)) {
+    throw new Error('AppSec team members must be provided as an array.');
+  }
+
+  const uniqueLogins = new Map();
+  for (const value of teamLogins) {
+    const login = String(value);
+    uniqueLogins.set(login.toLowerCase(), login);
+  }
+  const normalized = [...uniqueLogins.values()];
+  for (const login of normalized) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(login)) {
+      throw new Error(`Invalid GitHub team member login "${login}".`);
+    }
+  }
+  return normalized.sort((a, b) => a.localeCompare(b));
+}
+
 function buildDispatchPayload({
   organization,
   sourceRepository,
@@ -157,21 +177,43 @@ function buildDispatchPayload({
   alertType,
   alertNumber,
   dismissalRequest,
+  teamLogins,
   dryRun = false,
   runId = null,
 }) {
-  return {
+  const normalizedTeamLogins = normalizeTeamLogins(teamLogins);
+  if (normalizedTeamLogins.length === 0) {
+    throw new Error('The configured AppSec team has no members.');
+  }
+
+  const payload = {
     schema_version: DISPATCH_SCHEMA_VERSION,
-    organization,
-    source_repository: sourceRepository,
-    repository,
-    alert_type: alertType,
-    alert_number: alertNumber,
-    dismissal_request_id: dismissalRequest.id,
-    dismissal_request_number: dismissalRequest.number,
+    target: {
+      organization,
+      repository,
+      alert_type: alertType,
+      alert_number: alertNumber,
+      dismissal_request_id: dismissalRequest.id,
+      dismissal_request_number: dismissalRequest.number,
+    },
+    request: sanitizeDismissalRequest(dismissalRequest),
+    review: {
+      appsec_team_members: normalizedTeamLogins,
+    },
+    source: {
+      repository: sourceRepository,
+      run_id: runId,
+    },
     dry_run: dryRun,
-    source_run_id: runId,
   };
+
+  if (JSON.stringify(payload).length > MAX_DISPATCH_PAYLOAD_LENGTH) {
+    throw new Error(
+      `Dispatch payload exceeds the ${MAX_DISPATCH_PAYLOAD_LENGTH}-character safety limit.`
+    );
+  }
+
+  return payload;
 }
 
 async function dispatchAgenticReview(octokit, workflowRepository, payload) {
@@ -185,26 +227,6 @@ async function dispatchAgenticReview(octokit, workflowRepository, payload) {
   });
 }
 
-async function getDismissalRequest(
-  octokit,
-  owner,
-  repo,
-  alertType,
-  alertNumber
-) {
-  const { dismissalSegment } = getAlertTypeMetadata(alertType);
-  const response = await octokit.request(
-    `GET /repos/{owner}/{repo}/dismissal-requests/${dismissalSegment}/{alert_number}`,
-    {
-      owner,
-      repo,
-      alert_number: alertNumber,
-      headers: { 'X-GitHub-Api-Version': API_VERSION },
-    }
-  );
-  return response.data;
-}
-
 async function getAlert(octokit, owner, repo, alertType, alertNumber) {
   const { alertPath } = getAlertTypeMetadata(alertType);
   const response = await octokit.request(
@@ -213,6 +235,7 @@ async function getAlert(octokit, owner, repo, alertType, alertNumber) {
       owner,
       repo,
       alert_number: alertNumber,
+      ...(alertType === 'secret_scanning' ? { hide_secret: true } : {}),
       headers: { 'X-GitHub-Api-Version': API_VERSION },
     }
   );
@@ -265,55 +288,6 @@ async function mapWithConcurrency(items, limit, mapper) {
   return results;
 }
 
-async function getAssignableTeamMembers(
-  octokit,
-  owner,
-  repo,
-  teamMembers
-) {
-  const checks = await mapWithConcurrency(teamMembers, 10, async (member) => {
-    try {
-      const response = await octokit.request(
-        'GET /repos/{owner}/{repo}/collaborators/{username}/permission',
-        {
-          owner,
-          repo,
-          username: member.login,
-          headers: { 'X-GitHub-Api-Version': API_VERSION },
-        }
-      );
-      const permission = response.data.permission;
-      return {
-        login: member.login,
-        assignable: permission === 'admin' || permission === 'write',
-        permission,
-      };
-    } catch (error) {
-      if (error.status === 404) {
-        return {
-          login: member.login,
-          assignable: false,
-          permission: 'none',
-        };
-      }
-      throw error;
-    }
-  });
-
-  return {
-    assignable: checks
-      .filter((result) => result.assignable)
-      .map((result) => result.login)
-      .sort((a, b) => a.localeCompare(b)),
-    skipped: checks
-      .filter((result) => !result.assignable)
-      .map((result) => ({
-        login: result.login,
-        permission: result.permission,
-      })),
-  };
-}
-
 function selectSecretScanningAssignee(logins, alertNumber) {
   const sorted = [...new Set(logins)].sort((a, b) => a.localeCompare(b));
   if (sorted.length === 0) return null;
@@ -340,25 +314,18 @@ async function assignAlertToTeam({
 }) {
   const members =
     teamMembers || (await listTeamMembers(octokit, organization, teamSlug));
-  if (members.length === 0) {
-    throw new Error(`The @${organization}/${teamSlug} team has no members.`);
-  }
-
-  const eligibility = await getAssignableTeamMembers(
-    octokit,
-    owner,
-    repo,
-    members
+  const teamLogins = normalizeTeamLogins(
+    members.map((member) =>
+      typeof member === 'string' ? member : member.login
+    )
   );
-  if (eligibility.assignable.length === 0) {
-    throw new Error(
-      `No member of @${organization}/${teamSlug} has write access to ${owner}/${repo}.`
-    );
+  if (teamLogins.length === 0) {
+    throw new Error(`The @${organization}/${teamSlug} team has no members.`);
   }
 
   if (alertType === 'secret_scanning') {
     const assignee = selectSecretScanningAssignee(
-      eligibility.assignable,
+      teamLogins,
       alertNumber
     );
 
@@ -377,15 +344,15 @@ async function assignAlertToTeam({
 
     return {
       assigned: [assignee],
-      skipped: eligibility.skipped,
+      skipped: [],
       limitation:
-        'The secret scanning API supports one alert assignee, so one eligible team member was selected deterministically.',
+        'The secret scanning API supports one alert assignee, so one AppSec team member was selected deterministically.',
     };
   }
 
   const assignees = mergeAssignees(
     getAssignedLogins(alertType, alert),
-    eligibility.assignable
+    teamLogins
   );
   const endpoint =
     alertType === 'code_scanning'
@@ -403,8 +370,8 @@ async function assignAlertToTeam({
   }
 
   return {
-    assigned: eligibility.assignable,
-    skipped: eligibility.skipped,
+    assigned: teamLogins,
+    skipped: [],
     limitation: null,
   };
 }
@@ -434,6 +401,12 @@ function redactSensitiveText(value, sensitiveValues = []) {
 }
 
 function sanitizeDismissalRequest(request, sensitiveValues = []) {
+  const reasonValues = Array.isArray(request.dismissal_reasons)
+    ? request.dismissal_reasons
+    : Array.isArray(request.data)
+      ? request.data.map((item) => item?.reason)
+      : [];
+
   return {
     id: request.id,
     number: request.number,
@@ -446,6 +419,13 @@ function sanitizeDismissalRequest(request, sensitiveValues = []) {
       redactSensitiveText(request.requester_comment, sensitiveValues),
       10000
     ),
+    dismissal_reasons: [
+      ...new Set(
+        reasonValues
+          .filter((reason) => typeof reason === 'string' && reason)
+          .map((reason) => truncate(redactSensitiveText(reason), 100))
+      ),
+    ].slice(0, 10),
     created_at: request.created_at,
     expires_at: request.expires_at,
     html_url: request.html_url,
@@ -671,19 +651,22 @@ function validateDispatchEvent(event, config, env = process.env) {
     );
   }
 
+  const dispatchedTarget = payload.target || {};
   if (
-    typeof payload.organization !== 'string' ||
-    !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(payload.organization)
+    typeof dispatchedTarget.organization !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(
+      dispatchedTarget.organization
+    )
   ) {
     throw new Error('Dispatch payload contains an invalid organization.');
   }
 
   if (
-    payload.organization &&
-    payload.organization.toLowerCase() !== settings.organization.toLowerCase()
+    dispatchedTarget.organization.toLowerCase() !==
+    settings.organization.toLowerCase()
   ) {
     throw new Error(
-      `Dispatch organization ${payload.organization} does not match configured organization ${settings.organization}.`
+      `Dispatch organization ${dispatchedTarget.organization} does not match configured organization ${settings.organization}.`
     );
   }
 
@@ -697,26 +680,30 @@ function validateDispatchEvent(event, config, env = process.env) {
     );
   }
 
-  const { owner, repo } = splitRepository(payload.repository);
+  const { owner, repo } = splitRepository(dispatchedTarget.repository);
   if (owner.toLowerCase() !== settings.organization.toLowerCase()) {
     throw new Error(
-      `Dispatch target ${payload.repository} is outside configured organization ${settings.organization}.`
+      `Dispatch target ${dispatchedTarget.repository} is outside configured organization ${settings.organization}.`
     );
   }
 
-  getAlertTypeMetadata(payload.alert_type);
+  getAlertTypeMetadata(dispatchedTarget.alert_type);
   if (
     Array.isArray(config.alert_types) &&
-    !config.alert_types.includes(payload.alert_type)
+    !config.alert_types.includes(dispatchedTarget.alert_type)
   ) {
     throw new Error(
-      `Alert type "${payload.alert_type}" is not enabled in config.yml.`
+      `Alert type "${dispatchedTarget.alert_type}" is not enabled in config.yml.`
     );
   }
 
-  const alertNumber = Number(payload.alert_number);
-  const dismissalRequestId = Number(payload.dismissal_request_id);
-  const dismissalRequestNumber = Number(payload.dismissal_request_number);
+  const alertNumber = Number(dispatchedTarget.alert_number);
+  const dismissalRequestId = Number(
+    dispatchedTarget.dismissal_request_id
+  );
+  const dismissalRequestNumber = Number(
+    dispatchedTarget.dismissal_request_number
+  );
   if (
     !Number.isInteger(alertNumber) ||
     alertNumber <= 0 ||
@@ -726,6 +713,23 @@ function validateDispatchEvent(event, config, env = process.env) {
     dismissalRequestNumber <= 0
   ) {
     throw new Error('Dispatch payload contains invalid alert or request identifiers.');
+  }
+
+  const dismissalRequest = sanitizeDismissalRequest(payload.request || {});
+  if (
+    Number(dismissalRequest.id) !== dismissalRequestId ||
+    Number(dismissalRequest.number) !== dismissalRequestNumber
+  ) {
+    throw new Error(
+      'Dispatch request snapshot does not match the target request identifiers.'
+    );
+  }
+
+  const teamLogins = normalizeTeamLogins(
+    payload.review?.appsec_team_members
+  );
+  if (teamLogins.length === 0) {
+    throw new Error('Dispatch payload contains no AppSec team members.');
   }
 
   if (
@@ -745,10 +749,12 @@ function validateDispatchEvent(event, config, env = process.env) {
     owner,
     repo,
     repository: `${owner}/${repo}`,
-    alertType: payload.alert_type,
+    alertType: dispatchedTarget.alert_type,
     alertNumber,
     dismissalRequestId,
     dismissalRequestNumber,
+    dismissalRequest,
+    teamLogins,
     dryRun: payload.dry_run === true || payload.dry_run === 'true',
   };
 }
@@ -890,6 +896,18 @@ async function denyDismissalRequest(
   );
 }
 
+function isStaleDismissalReviewError(error) {
+  if (error?.status === 404) return true;
+  if (error?.status !== 422) return false;
+
+  const message = JSON.stringify(
+    error.response?.data || error.message || ''
+  ).toLowerCase();
+  return /(already|completed|cancelled|expired|approved|denied|not open|not pending|no pending)/.test(
+    message
+  );
+}
+
 module.exports = {
   ALERT_TYPE_METADATA,
   API_VERSION,
@@ -907,13 +925,13 @@ module.exports = {
   getAgenticSettings,
   getAlert,
   getAssignedLogins,
-  getDismissalRequest,
   getOrganization,
   isAssignedToTeam,
   isOpenDismissalRequest,
   listTeamMembers,
   loadConfig,
   mergeAssignees,
+  normalizeTeamLogins,
   parseAgentDecision,
   readDispatchEvent,
   redactSensitiveText,
@@ -922,5 +940,6 @@ module.exports = {
   sanitizeAgentReason,
   selectSecretScanningAssignee,
   splitRepository,
+  isStaleDismissalReviewError,
   validateDispatchEvent,
 };

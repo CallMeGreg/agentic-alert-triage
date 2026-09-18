@@ -9,8 +9,7 @@ const {
   denyDismissalRequest,
   formatAgenticDenialMessage,
   getAlert,
-  getDismissalRequest,
-  isOpenDismissalRequest,
+  isStaleDismissalReviewError,
   loadConfig,
   parseAgentDecision,
   readDispatchEvent,
@@ -28,31 +27,7 @@ async function main() {
   const target = validateDispatchEvent(event, config);
   const decision = parseAgentDecision();
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-
-  const dismissalRequest = await getDismissalRequest(
-    octokit,
-    target.owner,
-    target.repo,
-    target.alertType,
-    target.alertNumber
-  );
-
-  if (
-    dismissalRequest.id !== target.dismissalRequestId ||
-    dismissalRequest.number !== target.dismissalRequestNumber
-  ) {
-    throw new Error(
-      'The fetched dismissal request does not match the dispatched request identifiers.'
-    );
-  }
-
-  if (!isOpenDismissalRequest(dismissalRequest)) {
-    console.log('Dismissal request is no longer open; no action is required.');
-    appendSummary(
-      `## Agentic dismissal review\n\nNo action was taken because dismissal request #${target.dismissalRequestNumber} is no longer open.`
-    );
-    return;
-  }
+  const dismissalRequest = target.dismissalRequest;
 
   const staged =
     process.env.GH_AW_SAFE_OUTPUTS_STAGED === 'true' ||
@@ -68,14 +43,26 @@ async function main() {
     });
 
     if (!staged) {
-      await denyDismissalRequest(
-        octokit,
-        target.owner,
-        target.repo,
-        target.alertType,
-        target.alertNumber,
-        message
-      );
+      try {
+        await denyDismissalRequest(
+          octokit,
+          target.owner,
+          target.repo,
+          target.alertType,
+          target.alertNumber,
+          message
+        );
+      } catch (error) {
+        if (!isStaleDismissalReviewError(error)) throw error;
+
+        console.log(
+          'Dismissal request is no longer reviewable; treating the optimistic denial as a no-op.'
+        );
+        appendSummary(
+          `## Agentic dismissal review\n\nNo action was taken because dismissal request #${target.dismissalRequestNumber} is no longer reviewable.`
+        );
+        return;
+      }
     }
 
     console.log(
@@ -107,20 +94,13 @@ async function main() {
     alertType: target.alertType,
     alertNumber: target.alertNumber,
     alert,
+    teamMembers: target.teamLogins,
     dryRun: staged,
   });
 
   console.log(
     `${staged ? '[STAGED] Would assign' : 'Assigned'} alert #${target.alertNumber} to ${assignment.assigned.join(', ')}.`
   );
-  if (assignment.skipped.length > 0) {
-    console.log(
-      `Skipped team members without write access: ${assignment.skipped
-        .map((member) => `${member.login} (${member.permission})`)
-        .join(', ')}`
-    );
-  }
-
   appendSummary(`## Agentic dismissal review
 
 **Decision:** Ready for human review${staged ? ' (staged preview)' : ''}
@@ -131,13 +111,7 @@ async function main() {
 
 **Agent rationale:** ${decision.reason}
 ${assignment.limitation ? `\n> ${assignment.limitation}\n` : ''}
-${
-  assignment.skipped.length > 0
-    ? `\n**Not assigned (write access required):** ${assignment.skipped
-        .map((member) => `${member.login} (${member.permission})`)
-        .join(', ')}\n`
-    : ''
-}`);
+`);
 }
 
 if (require.main === module) {

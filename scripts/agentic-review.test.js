@@ -3,18 +3,55 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  assignAlertToTeam,
   buildDispatchPayload,
   buildReviewContext,
   extractAlertNumber,
   extractIssueReferences,
   getAgenticSettings,
   isAssignedToTeam,
+  isStaleDismissalReviewError,
   mergeAssignees,
   sanitizeAlert,
   sanitizeAgentReason,
   selectSecretScanningAssignee,
   validateDispatchEvent,
 } = require('./agentic-review');
+
+function createDispatchEvent(overrides = {}) {
+  return {
+    action: 'alert-dismissal-requested',
+    sender: { login: 'alert-dismissal-bot[bot]' },
+    client_payload: {
+      schema_version: 2,
+      target: {
+        organization: 'octo-org',
+        repository: 'octo-org/service',
+        alert_type: 'code_scanning',
+        alert_number: 8,
+        dismissal_request_id: 20,
+        dismissal_request_number: 2,
+      },
+      request: {
+        id: 20,
+        number: 2,
+        status: 'open',
+        requester: { actor_name: 'octocat' },
+        requester_comment: 'The finding is limited to test code.',
+        dismissal_reasons: ['tests'],
+      },
+      review: {
+        appsec_team_members: ['security-one', 'security-two'],
+      },
+      source: {
+        repository: 'octo-org/automation',
+        run_id: '123',
+      },
+      dry_run: false,
+      ...overrides,
+    },
+  };
+}
 
 describe('agentic configuration', () => {
   it('defaults to deterministic review and a staged appsec-team workflow', () => {
@@ -83,7 +120,7 @@ describe('agentic configuration', () => {
 });
 
 describe('dispatch payloads', () => {
-  it('contains identifiers but not untrusted requester text', () => {
+  it('contains a sanitized request and AppSec membership snapshot', () => {
     const payload = buildDispatchPayload({
       organization: 'octo-org',
       sourceRepository: 'octo-org/automation',
@@ -93,33 +130,33 @@ describe('dispatch payloads', () => {
       dismissalRequest: {
         id: 99,
         number: 4,
-        requester_comment: 'do not include me',
+        status: 'open',
+        requester: { actor_name: 'octocat' },
+        requester_comment:
+          'Rotated github_pat_12345678901234567890 and documented the result.',
+        data: [{ reason: 'revoked', secret: 'must-not-pass-through' }],
       },
+      teamLogins: ['security-two', 'security-one'],
       dryRun: false,
       runId: '123',
     });
 
-    assert.equal(payload.repository, 'octo-org/service');
-    assert.equal(payload.alert_number, 12);
-    assert.equal(payload.dismissal_request_id, 99);
-    assert.equal(payload.dismissal_request_number, 4);
-    assert.equal(payload.requester_comment, undefined);
+    assert.equal(payload.schema_version, 2);
+    assert.equal(payload.target.repository, 'octo-org/service');
+    assert.equal(payload.target.alert_number, 12);
+    assert.equal(payload.request.id, 99);
+    assert.deepEqual(payload.request.dismissal_reasons, ['revoked']);
+    assert.deepEqual(payload.review.appsec_team_members, [
+      'security-one',
+      'security-two',
+    ]);
+    assert.equal(payload.request.requester_comment.includes('github_pat_'), false);
+    assert.equal(JSON.stringify(payload).includes('must-not-pass-through'), false);
   });
 
   it('validates the target organization and identifiers', () => {
-    const event = {
-      action: 'alert-dismissal-requested',
-      sender: { login: 'alert-dismissal-bot[bot]' },
-      client_payload: {
-        schema_version: 1,
-        organization: 'octo-org',
-        repository: 'octo-org/service',
-        alert_type: 'secret_scanning',
-        alert_number: 8,
-        dismissal_request_id: 20,
-        dismissal_request_number: 2,
-      },
-    };
+    const event = createDispatchEvent();
+    event.client_payload.target.alert_type = 'secret_scanning';
     const config = {
       review_mode: 'agentic',
       organization: 'octo-org',
@@ -133,8 +170,10 @@ describe('dispatch payloads', () => {
 
     assert.equal(target.repository, 'octo-org/service');
     assert.equal(target.alertNumber, 8);
+    assert.equal(target.dismissalRequest.requester.actor_name, 'octocat');
+    assert.deepEqual(target.teamLogins, ['security-one', 'security-two']);
 
-    event.client_payload.repository = 'another-org/service';
+    event.client_payload.target.repository = 'another-org/service';
     assert.throws(
       () =>
         validateDispatchEvent(event, config, {
@@ -146,19 +185,8 @@ describe('dispatch payloads', () => {
   });
 
   it('rejects dispatches not sent by the configured GitHub App', () => {
-    const event = {
-      action: 'alert-dismissal-requested',
-      sender: { login: 'octocat' },
-      client_payload: {
-        schema_version: 1,
-        organization: 'octo-org',
-        repository: 'octo-org/service',
-        alert_type: 'code_scanning',
-        alert_number: 8,
-        dismissal_request_id: 20,
-        dismissal_request_number: 2,
-      },
-    };
+    const event = createDispatchEvent();
+    event.sender.login = 'octocat';
     const config = {
       review_mode: 'agentic',
       organization: 'octo-org',
@@ -177,18 +205,7 @@ describe('dispatch payloads', () => {
   });
 
   it('rejects dispatches when agentic review is disabled', () => {
-    const event = {
-      action: 'alert-dismissal-requested',
-      client_payload: {
-        schema_version: 1,
-        organization: 'octo-org',
-        repository: 'octo-org/service',
-        alert_type: 'code_scanning',
-        alert_number: 8,
-        dismissal_request_id: 20,
-        dismissal_request_number: 2,
-      },
-    };
+    const event = createDispatchEvent();
 
     assert.throws(
       () =>
@@ -327,6 +344,40 @@ describe('alert handling', () => {
       'max'
     );
   });
+
+  it('assigns snapshotted team members without collaborator permission reads', async () => {
+    const requests = [];
+    const octokit = {
+      request: async (endpoint, parameters) => {
+        requests.push({ endpoint, parameters });
+        return { data: {} };
+      },
+    };
+
+    const result = await assignAlertToTeam({
+      octokit,
+      owner: 'octo-org',
+      repo: 'service',
+      organization: 'octo-org',
+      teamSlug: 'appsec-team',
+      alertType: 'code_scanning',
+      alertNumber: 8,
+      alert: { assignees: [{ login: 'existing' }] },
+      teamMembers: ['security-one', 'security-two'],
+    });
+
+    assert.deepEqual(result.assigned, ['security-one', 'security-two']);
+    assert.equal(requests.length, 1);
+    assert.equal(
+      requests[0].endpoint,
+      'PATCH /repos/{owner}/{repo}/code-scanning/alerts/{alert_number}'
+    );
+    assert.deepEqual(requests[0].parameters.assignees, [
+      'existing',
+      'security-one',
+      'security-two',
+    ]);
+  });
 });
 
 describe('evidence and decision sanitization', () => {
@@ -358,5 +409,23 @@ describe('evidence and decision sanitization', () => {
     assert.equal(reason.includes('https://'), false);
     assert.equal(reason.includes('\n'), false);
     assert.ok(reason.length <= 1200);
+  });
+
+  it('only treats known stale optimistic-write errors as no-ops', () => {
+    assert.equal(isStaleDismissalReviewError({ status: 404 }), true);
+    assert.equal(
+      isStaleDismissalReviewError({
+        status: 422,
+        response: { data: { message: 'Request already completed' } },
+      }),
+      true
+    );
+    assert.equal(
+      isStaleDismissalReviewError({
+        status: 422,
+        response: { data: { message: 'Validation failed' } },
+      }),
+      false
+    );
   });
 });

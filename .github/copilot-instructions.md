@@ -42,11 +42,11 @@ Delegated alert dismissal must be enabled in the monitored organization.
 |---|---|
 | Polling remains the discovery mechanism | No public webhook receiver is required. |
 | `review_mode` controls deterministic, agentic, or combined review | Agentic behavior is optional and backward compatible. |
-| Dispatch payloads contain identifiers only | Requester-controlled content is fetched later with a fresh App token. |
+| Dispatch payloads contain sanitized snapshots | The poller already has the request and team membership, so agentic runs avoid redundant reads. |
 | Agent input is minimized and sanitized | Secret values are removed and linked evidence is bounded to same-org issues. |
 | Agent writes use a custom SafeOutput | The model has no App token and cannot directly change GitHub state. |
 | Ready is not approval | Ready requests remain open and are assigned to AppSec for final human review. |
-| The AppSec team slug is configurable | Defaults to `appsec-team`; members must have repository write access. |
+| The AppSec team slug is configurable | Defaults to `appsec-team`; the team is assumed to hold the organization security manager role. |
 | The `.lock.yml` is generated | Edit the `.md` source and run `npm run compile:agentic`; never hand-edit the lockfile. |
 
 ## Poller behavior (`scripts/check-dismissals.js`)
@@ -61,8 +61,9 @@ Delegated alert dismissal must be enabled in the monitored organization.
 5. Agentic dispatches use `POST /repos/{owner}/{repo}/dispatches` with event
    type `alert-dismissal-requested`.
 
-The dispatch body must not contain requester comments, alert content, secrets,
-or agent instructions.
+The dispatch body contains a bounded, redacted dismissal request snapshot and
+the AppSec team member logins. It must not contain alert content, literal
+secrets, or agent instructions.
 
 ## Agentic workflow behavior
 
@@ -77,10 +78,13 @@ Compilation uses strict mode and generates
 - validates the event against `config.yml`;
 - verifies the dispatch sender matches the GitHub App whose credentials are
   configured for the workflow;
-- fetches the exact dismissal request and alert using a GitHub App token;
-- verifies request ID, request number, target org, alert type, and open status;
-- skips inference when the request is stale or already assigned to AppSec;
-- removes the `secret` value from secret scanning alerts;
+- validates the snapshotted request ID, request number, target org, alert type,
+  status, and AppSec membership;
+- fetches only the current alert using a GitHub App token;
+- skips inference when the snapshot was not open or the alert is already
+  assigned to AppSec;
+- requests hidden secret values and removes sensitive patterns before context
+  is written;
 - fetches at most five same-organization linked issues and up to 20 comments
   per issue;
 - writes `.github/agentic-review-context.json` for the agent.
@@ -111,13 +115,16 @@ It never approves a dismissal request.
 
 `scripts/apply-agentic-decision.js`:
 
-- revalidates the event and re-fetches current request state;
+- revalidates the App-authenticated event snapshot without re-fetching the
+  request;
 - parses exactly one structured decision;
 - neutralizes mentions in agent-provided reasoning;
 - honors gh-aw staged mode, `agentic.staged`, and dispatch dry-run;
-- assigns ready code scanning and Dependabot alerts to eligible AppSec members
-  while preserving existing assignees;
-- assigns secret scanning alerts to one deterministic eligible member because
+- applies denials optimistically and treats known stale-review responses as
+  no-ops;
+- assigns ready code scanning and Dependabot alerts to snapshotted AppSec
+  members while preserving existing assignees;
+- assigns secret scanning alerts to one deterministic member because
   that API supports a single assignee;
 - denies invalid requests with actionable requester guidance and the configured
   help contact.
@@ -175,7 +182,10 @@ Repository permissions:
 - Issues: read when linked private issue evidence is needed
 - Metadata: read
 
-AppSec team members require repository write access to be assigned to alerts.
+The configured AppSec team is assumed to have GitHub's organization security
+manager role, which provides read access to every repository and write access
+to security alerts. The automation does not make per-user collaborator
+permission checks; assignment API failures are surfaced explicitly.
 
 ## Required secrets
 

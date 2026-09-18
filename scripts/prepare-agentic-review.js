@@ -12,10 +12,8 @@ const {
   fetchIssueEvidence,
   getAlert,
   getAssignedLogins,
-  getDismissalRequest,
   isAssignedToTeam,
   isOpenDismissalRequest,
-  listTeamMembers,
   loadConfig,
   readDispatchEvent,
   validateDispatchEvent,
@@ -26,8 +24,19 @@ async function main() {
   const event = readDispatchEvent();
   const target = validateDispatchEvent(event, config);
   const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+  const dismissalRequest = target.dismissalRequest;
 
-  const dismissalRequest = await getDismissalRequest(
+  if (!isOpenDismissalRequest(dismissalRequest)) {
+    appendNoop(
+      `Dismissal request #${target.dismissalRequestNumber} was not open in the dispatched snapshot.`
+    );
+    console.log(
+      'Dismissal request snapshot was not open; skipping agent execution.'
+    );
+    return;
+  }
+
+  const alert = await getAlert(
     octokit,
     target.owner,
     target.repo,
@@ -35,36 +44,7 @@ async function main() {
     target.alertNumber
   );
 
-  if (
-    dismissalRequest.id !== target.dismissalRequestId ||
-    dismissalRequest.number !== target.dismissalRequestNumber
-  ) {
-    throw new Error(
-      'The fetched dismissal request does not match the dispatched request identifiers.'
-    );
-  }
-
-  if (!isOpenDismissalRequest(dismissalRequest)) {
-    appendNoop(
-      `Dismissal request #${target.dismissalRequestNumber} is no longer open.`
-    );
-    console.log('Dismissal request is no longer open; skipping agent execution.');
-    return;
-  }
-
-  const [alert, teamMembers] = await Promise.all([
-    getAlert(
-      octokit,
-      target.owner,
-      target.repo,
-      target.alertType,
-      target.alertNumber
-    ),
-    listTeamMembers(octokit, target.organization, target.teamSlug),
-  ]);
-  const teamLogins = teamMembers.map((member) => member.login);
-
-  if (isAssignedToTeam(target.alertType, alert, teamLogins)) {
+  if (isAssignedToTeam(target.alertType, alert, target.teamLogins)) {
     appendNoop(
       `Alert #${target.alertNumber} is already assigned to @${target.organization}/${target.teamSlug}.`
     );

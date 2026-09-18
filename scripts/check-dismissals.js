@@ -339,6 +339,7 @@ async function processDismissalRequest(req, alertType) {
     alertType,
     alertNumber,
     dismissalRequest: req,
+    teamLogins,
     dryRun: DRY_RUN,
     runId: process.env.GITHUB_RUN_ID || null,
   });

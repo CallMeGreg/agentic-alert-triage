@@ -49,9 +49,11 @@ agentic:
   # workflow_repository: my-org/alert-dismissal-automation
 
   # Team whose members receive alerts that the agent determines are ready for
-  # human review. Code scanning and Dependabot support multiple assignees.
-  # Secret scanning currently supports one assignee, selected deterministically
-  # from eligible team members.
+  # human review. The team is expected to hold the organization security
+  # manager role, so the automation does not perform per-repository
+  # collaborator permission checks. Code scanning and Dependabot support
+  # multiple assignees. Secret scanning currently supports one assignee,
+  # selected deterministically from the team.
   appsec_team_slug: appsec-team
 
   # Keep staged mode enabled while piloting. The agent runs and SafeOutput
