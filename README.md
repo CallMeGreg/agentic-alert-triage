@@ -82,7 +82,7 @@ safe no-ops. Assignment endpoint failures are not hidden.
 - Secret scanning currently supports one alert assignee, selected
   deterministically from the team snapshot.
 
-> [IMPORTANT]
+> [!IMPORTANT]
 > The configured team is assumed to hold GitHub's organization
 [Security Manager role](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-peoples-access-to-your-organization-with-roles/managing-security-managers-in-your-organization),
 which provides repository read access and permission to manage security alerts & dismissal requests.
