@@ -888,6 +888,16 @@ describe('evidence and decision sanitization', () => {
     assert.ok(reason.length <= 1200);
   });
 
+  it('removes angle brackets from nested agent-provided HTML', () => {
+    const reason = sanitizeAgentReason(
+      'Suspicious nested markup: <scr<script>alert(1)</script>ipt>.'
+    );
+
+    assert.equal(reason.includes('<script'), false);
+    assert.equal(reason.includes('<'), false);
+    assert.equal(reason.includes('>'), false);
+  });
+
   it('only treats known stale optimistic-write errors as no-ops', () => {
     assert.equal(isStaleDismissalReviewError({ status: 404 }), true);
     assert.equal(
