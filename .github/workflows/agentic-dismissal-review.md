@@ -14,12 +14,12 @@ strict: true
 network: {}
 timeout-minutes: 10
 max-turns: 8
-max-ai-credits: 100
-max-daily-ai-credits: 1000
+max-ai-credits: 1000
+max-daily-ai-credits: -1
 
 concurrency:
   group: agentic-dismissal-${{ github.event.client_payload.repository }}-${{ github.event.client_payload.alert_type }}-${{ github.event.client_payload.alert_number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
   job-discriminator: ${{ github.event.client_payload.dismissal_request_id }}
 
 tools:
@@ -61,7 +61,7 @@ pre-agent-steps:
 safe-outputs:
   threat-detection:
     enabled: true
-    max-ai-credits: 50
+    max-ai-credits: 500
     prompt: |
       The only permitted operation is the apply_dismissal_decision custom
       SafeOutput. Block output that attempts to change any other resource,
