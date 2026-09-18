@@ -1,103 +1,126 @@
-// scripts/check-dismissals.test.js
-//
-// Unit tests for the exported helpers in check-dismissals.js.
-// Run with: npm test  (uses Node.js built-in test runner, Node ≥ 20)
-
 'use strict';
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { validateDismissalComment, formatDenialMessage } = require('./check-dismissals');
-
-// ---------------------------------------------------------------------------
-// validateDismissalComment
-// ---------------------------------------------------------------------------
+const {
+  formatDenialMessage,
+  validateDismissalComment,
+} = require('./check-dismissals');
 
 describe('validateDismissalComment', () => {
-  // The module reads config.yml at load time.  The default config.yml ships
-  // with required_phrase: "mitigating control" and no required_pattern or
-  // minimum_length, so only the phrase check is active.
+  const phraseRules = {
+    requiredPhrase: 'mitigating control',
+    requiredPattern: null,
+    minimumLength: null,
+    caseSensitive: false,
+  };
 
   it('accepts a comment containing the required phrase', () => {
     const result = validateDismissalComment(
-      'We have a mitigating control in place via WAF rules.'
+      'We have a mitigating control in place via WAF rules.',
+      phraseRules
     );
     assert.equal(result.valid, true);
     assert.equal(result.reason, undefined);
   });
 
-  it('accepts the required phrase regardless of case (default case_sensitive: false)', () => {
-    const result = validateDismissalComment('MITIGATING CONTROL documented.');
+  it('accepts the required phrase regardless of case', () => {
+    const result = validateDismissalComment(
+      'MITIGATING CONTROL documented.',
+      phraseRules
+    );
     assert.equal(result.valid, true);
   });
 
   it('rejects a comment missing the required phrase', () => {
-    const result = validateDismissalComment('This is not relevant.');
+    const result = validateDismissalComment(
+      'This is not relevant.',
+      phraseRules
+    );
     assert.equal(result.valid, false);
-    assert.ok(result.reason.includes('required phrase'));
+    assert.match(result.reason, /required phrase/);
   });
 
-  it('rejects null / undefined comments when required_phrase is set', () => {
-    assert.equal(validateDismissalComment(null).valid, false);
-    assert.equal(validateDismissalComment(undefined).valid, false);
+  it('rejects empty comments when criteria are configured', () => {
+    assert.equal(validateDismissalComment(null, phraseRules).valid, false);
+    assert.equal(validateDismissalComment(undefined, phraseRules).valid, false);
+    assert.equal(validateDismissalComment('', phraseRules).valid, false);
+    assert.equal(validateDismissalComment('   ', phraseRules).valid, false);
   });
 
-  it('rejects empty string when required_phrase is set', () => {
-    assert.equal(validateDismissalComment('').valid, false);
+  it('enforces minimum length and regular expression rules', () => {
+    const rules = {
+      requiredPhrase: null,
+      requiredPattern: '^SEC-\\d+:',
+      minimumLength: 12,
+      caseSensitive: true,
+    };
+
+    assert.equal(
+      validateDismissalComment('SEC-42: accepted risk', rules).valid,
+      true
+    );
+    assert.match(
+      validateDismissalComment('SEC-42:', rules).reason,
+      /at least 12 characters/
+    );
+    assert.match(
+      validateDismissalComment('sec-42: accepted risk', rules).reason,
+      /required pattern/
+    );
   });
 
-  it('rejects whitespace-only string when required_phrase is set', () => {
-    assert.equal(validateDismissalComment('   ').valid, false);
+  it('reports invalid configured regular expressions', () => {
+    const result = validateDismissalComment('anything', {
+      requiredPhrase: null,
+      requiredPattern: '[',
+      minimumLength: null,
+      caseSensitive: false,
+    });
+
+    assert.equal(result.valid, false);
+    assert.match(result.reason, /not a valid regular expression/);
   });
 });
 
-// ---------------------------------------------------------------------------
-// formatDenialMessage
-// ---------------------------------------------------------------------------
-
 describe('formatDenialMessage', () => {
-  it('substitutes all placeholders in the default template', () => {
-    const msg = formatDenialMessage({
-      alertType: 'code_scanning',
-      alertNumber: 42,
-      requester: 'octocat',
-      denialReason: 'Missing required phrase.',
-      repoFullName: 'my-org/my-repo',
-    });
+  it('substitutes all supported placeholders', () => {
+    const msg = formatDenialMessage(
+      {
+        alertType: 'code_scanning',
+        alertNumber: 42,
+        requester: 'octocat',
+        denialReason: 'Missing required phrase.',
+        repoFullName: 'my-org/my-repo',
+      },
+      {
+        required_phrase: 'mitigating control',
+        denial_message:
+          '{alert_type} #{alert_number} {requester} {required_phrase} {denial_reason} {repo_full_name}',
+      }
+    );
 
-    assert.ok(msg.includes('code scanning'), 'should contain humanized alert type');
-    assert.ok(msg.includes('#42'), 'should contain alert number');
-    assert.ok(msg.includes('Missing required phrase.'), 'should contain denial reason');
-    assert.ok(msg.includes('my-org/my-repo'), 'should contain repo full name');
+    assert.equal(
+      msg,
+      'code scanning #42 octocat mitigating control Missing required phrase. my-org/my-repo'
+    );
   });
 
-  it('substitutes {requester} when a custom template uses it', () => {
-    // Temporarily test with a custom template containing {requester}
-    const msg = formatDenialMessage({
-      alertType: 'dependabot',
-      alertNumber: 7,
-      requester: 'octocat',
-      denialReason: 'Too short.',
-      repoFullName: 'org/repo',
-    });
+  it('uses the built-in template when no custom template is configured', () => {
+    const msg = formatDenialMessage(
+      {
+        alertType: 'dependabot',
+        alertNumber: 7,
+        requester: undefined,
+        denialReason: 'Too short.',
+        repoFullName: 'org/repo',
+      },
+      {}
+    );
 
-    // Default template doesn't include {requester}, but the message should
-    // still be well-formed.
-    assert.ok(msg.includes('dependabot'), 'should contain alert type');
-    assert.ok(msg.includes('#7'), 'should contain alert number');
-  });
-
-  it('handles undefined requester without error', () => {
-    // Should not throw even when requester is undefined.
-    const msg = formatDenialMessage({
-      alertType: 'dependabot',
-      alertNumber: 7,
-      requester: undefined,
-      denialReason: 'Too short.',
-      repoFullName: 'org/repo',
-    });
-
-    assert.ok(typeof msg === 'string');
-    assert.ok(msg.length > 0);
+    assert.match(msg, /dependabot/);
+    assert.match(msg, /#7/);
+    assert.match(msg, /Too short/);
+    assert.match(msg, /org\/repo/);
   });
 });

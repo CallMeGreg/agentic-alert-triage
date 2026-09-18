@@ -16,28 +16,26 @@
 'use strict';
 
 const { Octokit } = require('@octokit/rest');
-const fs = require('fs');
-const path = require('path');
-const yaml = require('js-yaml');
+const {
+  API_VERSION,
+  buildDispatchPayload,
+  denyDismissalRequest,
+  dispatchAgenticReview,
+  extractAlertNumber,
+  getAgenticSettings,
+  getAlert,
+  getOrganization,
+  isAssignedToTeam,
+  listTeamMembers,
+  loadConfig,
+} = require('./agentic-review');
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-function loadConfig() {
-  const configPath =
-    process.env.CONFIG_PATH ||
-    path.join(process.cwd(), 'config.yml');
-
-  if (!fs.existsSync(configPath)) {
-    console.error(`[ERROR] Config file not found: ${configPath}`);
-    process.exit(1);
-  }
-
-  return yaml.load(fs.readFileSync(configPath, 'utf8'));
-}
-
 const config = loadConfig();
+const agenticSettings = getAgenticSettings(config);
 
 const REQUIRED_PHRASE = config.required_phrase ?? null;
 const REQUIRED_PATTERN = config.required_pattern ?? null;
@@ -49,11 +47,9 @@ const CASE_SENSITIVE = config.case_sensitive === true;
 const ALERT_TYPES = Array.isArray(config.alert_types)
   ? config.alert_types
   : ['code_scanning', 'secret_scanning', 'dependabot'];
+const REVIEW_MODE = agenticSettings.reviewMode;
 const DRY_RUN = process.env.DRY_RUN === 'true';
 const DEBUG = process.env.DEBUG === 'true';
-
-// All new dismissal request endpoints require this API version header.
-const API_VERSION = '2026-03-10';
 
 // ---------------------------------------------------------------------------
 // Debug helper
@@ -62,9 +58,6 @@ const API_VERSION = '2026-03-10';
 function debug(...args) {
   if (DEBUG) console.log('[DEBUG]', ...args);
 }
-
-// Maximum length allowed by the dismissal request review API for the message body.
-const MAX_DENIAL_MESSAGE_LENGTH = 2048;
 
 // ---------------------------------------------------------------------------
 // GitHub client
@@ -82,7 +75,6 @@ async function debugAuth() {
   const token = process.env.GITHUB_TOKEN;
   debug(`GITHUB_TOKEN present: ${!!token}`);
   debug(`GITHUB_TOKEN length : ${token ? token.length : 0}`);
-  debug(`GITHUB_TOKEN prefix : ${token ? token.slice(0, 8) + '…' : '(none)'}`);
   debug(`GITHUB_REPOSITORY   : ${process.env.GITHUB_REPOSITORY || '(not set)'}`);
   debug(`DRY_RUN             : ${DRY_RUN}`);
 
@@ -133,17 +125,7 @@ async function debugAuth() {
  * @returns {string}
  */
 function getOrg() {
-  if (config.organization) return config.organization;
-
-  if (process.env.GITHUB_REPOSITORY) {
-    return process.env.GITHUB_REPOSITORY.split('/')[0];
-  }
-
-  console.error(
-    '[ERROR] Cannot determine organization. ' +
-      'Set "organization" in config.yml or run inside a GitHub Actions context.'
-  );
-  process.exit(1);
+  return agenticSettings.organization || getOrganization(config);
 }
 
 // ---------------------------------------------------------------------------
@@ -158,40 +140,53 @@ function getOrg() {
  * considered valid.
  *
  * @param {string|null|undefined} comment
+ * @param {object} [overrides]
  * @returns {{ valid: boolean, reason?: string }}
  */
-function validateDismissalComment(comment) {
+function validateDismissalComment(comment, overrides = {}) {
+  const requiredPhrase = Object.hasOwn(overrides, 'requiredPhrase')
+    ? overrides.requiredPhrase
+    : REQUIRED_PHRASE;
+  const requiredPattern = Object.hasOwn(overrides, 'requiredPattern')
+    ? overrides.requiredPattern
+    : REQUIRED_PATTERN;
+  const minimumLength = Object.hasOwn(overrides, 'minimumLength')
+    ? overrides.minimumLength
+    : MINIMUM_LENGTH;
+  const caseSensitive = Object.hasOwn(overrides, 'caseSensitive')
+    ? overrides.caseSensitive
+    : CASE_SENSITIVE;
   const trimmed = (comment || '').trim();
 
   // 1. Minimum length --------------------------------------------------
-  if (MINIMUM_LENGTH != null && trimmed.length < MINIMUM_LENGTH) {
+  if (minimumLength != null && trimmed.length < minimumLength) {
     return {
       valid: false,
-      reason: `The dismissal comment must be at least ${MINIMUM_LENGTH} characters long (found ${trimmed.length}).`,
+      reason: `The dismissal comment must be at least ${minimumLength} characters long (found ${trimmed.length}).`,
     };
   }
 
   // 2. Required phrase --------------------------------------------------
-  if (REQUIRED_PHRASE) {
-    const haystack = CASE_SENSITIVE ? trimmed : trimmed.toLowerCase();
-    const needle = CASE_SENSITIVE
-      ? REQUIRED_PHRASE
-      : REQUIRED_PHRASE.toLowerCase();
+  if (requiredPhrase) {
+    const haystack = caseSensitive ? trimmed : trimmed.toLowerCase();
+    const needle = caseSensitive
+      ? requiredPhrase
+      : requiredPhrase.toLowerCase();
 
     if (!haystack.includes(needle)) {
       return {
         valid: false,
-        reason: `The dismissal comment did not include the required phrase: "${REQUIRED_PHRASE}"`,
+        reason: `The dismissal comment did not include the required phrase: "${requiredPhrase}"`,
       };
     }
   }
 
   // 3. Required pattern (regex) -----------------------------------------
-  if (REQUIRED_PATTERN) {
-    const flags = CASE_SENSITIVE ? '' : 'i';
+  if (requiredPattern) {
+    const flags = caseSensitive ? '' : 'i';
     let regex;
     try {
-      regex = new RegExp(REQUIRED_PATTERN, flags);
+      regex = new RegExp(requiredPattern, flags);
     } catch (e) {
       return {
         valid: false,
@@ -201,7 +196,7 @@ function validateDismissalComment(comment) {
     if (!regex.test(trimmed)) {
       return {
         valid: false,
-        reason: `The dismissal comment did not match the required pattern: "${REQUIRED_PATTERN}"`,
+        reason: `The dismissal comment did not match the required pattern: "${requiredPattern}"`,
       };
     }
   }
@@ -238,50 +233,130 @@ function formatDenialMessage({
   requester,
   denialReason,
   repoFullName,
-}) {
+}, templateConfig = config) {
   const template =
-    config.denial_message && config.denial_message.trim()
-      ? config.denial_message
+    templateConfig.denial_message && templateConfig.denial_message.trim()
+      ? templateConfig.denial_message
       : getDefaultDenialTemplate();
 
   return template
     .replace(/{alert_type}/g, alertType.replace(/_/g, ' '))
     .replace(/{alert_number}/g, String(alertNumber))
     .replace(/{requester}/g, requester || 'unknown')
-    .replace(/{required_phrase}/g, REQUIRED_PHRASE || '')
+    .replace(
+      /{required_phrase}/g,
+      templateConfig.required_phrase || REQUIRED_PHRASE || ''
+    )
     .replace(/{denial_reason}/g, denialReason)
     .replace(/{repo_full_name}/g, repoFullName);
 }
 
 // ---------------------------------------------------------------------------
-// Dismissal request review (deny)
+// Request handling
 // ---------------------------------------------------------------------------
 
-/**
- * Calls the review endpoint to deny a dismissal request.
- *
- * @param {string} owner
- * @param {string} repo
- * @param {string} alertType  — 'code-scanning' | 'secret-scanning' | 'dependabot'
- * @param {number} alertNumber
- * @param {string} message    — reason for denial (≤ 2048 chars)
- */
-async function denyDismissalRequest(owner, repo, alertType, alertNumber, message) {
-  const truncatedMessage =
-    message.length > MAX_DENIAL_MESSAGE_LENGTH
-      ? message.slice(0, MAX_DENIAL_MESSAGE_LENGTH - 3) + '...'
-      : message;
+let appSecTeamLoginsPromise;
 
-  await octokit.request(
-    `PATCH /repos/{owner}/{repo}/dismissal-requests/${alertType}/{alert_number}`,
-    {
-      owner,
-      repo,
-      alert_number: alertNumber,
-      status: 'deny',
-      message: truncatedMessage,
-      headers: { 'X-GitHub-Api-Version': API_VERSION },
+async function getAppSecTeamLogins() {
+  if (!appSecTeamLoginsPromise) {
+    appSecTeamLoginsPromise = listTeamMembers(
+      octokit,
+      agenticSettings.organization,
+      agenticSettings.teamSlug
+    ).then((members) => members.map((member) => member.login));
+  }
+  return appSecTeamLoginsPromise;
+}
+
+async function processDismissalRequest(req, alertType) {
+  const repoFullName = req.repository.full_name;
+  const [owner, repo] = repoFullName.split('/');
+  const alertNumber = extractAlertNumber(alertType, req);
+  const requester = req.requester?.actor_name;
+
+  if (!Number.isInteger(alertNumber) || alertNumber <= 0) {
+    throw new Error(
+      `Could not determine the alert number for dismissal request #${req.number} (${repoFullName}, ${alertType}).`
+    );
+  }
+
+  if (REVIEW_MODE !== 'agentic') {
+    const result = validateDismissalComment(req.requester_comment);
+
+    if (!result.valid) {
+      console.log(
+        `     ❌ Request #${req.number} (${repoFullName} alert #${alertNumber}) — DENIED: ${result.reason}`
+      );
+
+      const denialMessage = formatDenialMessage({
+        alertType,
+        alertNumber,
+        requester,
+        denialReason: result.reason,
+        repoFullName,
+      });
+
+      if (!DRY_RUN) {
+        await denyDismissalRequest(
+          octokit,
+          owner,
+          repo,
+          alertType,
+          alertNumber,
+          denialMessage
+        );
+        console.log(`     🚫 Denied dismissal request #${req.number}.`);
+      } else {
+        console.log(`     [DRY RUN] Would deny dismissal request #${req.number}.`);
+      }
+      return;
     }
+
+    if (REVIEW_MODE === 'deterministic') {
+      console.log(
+        `     ✅ Request #${req.number} (${repoFullName} alert #${alertNumber}) — valid comment, leaving open for human review.`
+      );
+      return;
+    }
+  }
+
+  const [alert, teamLogins] = await Promise.all([
+    getAlert(octokit, owner, repo, alertType, alertNumber),
+    getAppSecTeamLogins(),
+  ]);
+  if (isAssignedToTeam(alertType, alert, teamLogins)) {
+    console.log(
+      `     ⏭️  Request #${req.number} (${repoFullName} alert #${alertNumber}) — already assigned to @${agenticSettings.organization}/${agenticSettings.teamSlug}.`
+    );
+    return;
+  }
+
+  const payload = buildDispatchPayload({
+    organization: agenticSettings.organization,
+    sourceRepository:
+      process.env.GITHUB_REPOSITORY || agenticSettings.workflowRepository,
+    repository: repoFullName,
+    alertType,
+    alertNumber,
+    dismissalRequest: req,
+    dryRun: DRY_RUN,
+    runId: process.env.GITHUB_RUN_ID || null,
+  });
+
+  if (DRY_RUN) {
+    console.log(
+      `     [DRY RUN] Would dispatch agentic review for request #${req.number} (${repoFullName} alert #${alertNumber}).`
+    );
+    return;
+  }
+
+  await dispatchAgenticReview(
+    octokit,
+    agenticSettings.workflowRepository,
+    payload
+  );
+  console.log(
+    `     🤖 Dispatched agentic review for request #${req.number} (${repoFullName} alert #${alertNumber}).`
   );
 }
 
@@ -319,18 +394,29 @@ async function processCodeScanningRequests(org) {
         debug(`Code scanning — raw data length: ${Array.isArray(raw.data) ? raw.data.length : 'N/A'}`);
         if (Array.isArray(raw.data) && raw.data.length > 0) {
           debug(`Code scanning — first item keys: ${Object.keys(raw.data[0]).join(', ')}`);
-          debug(`Code scanning — first item: ${JSON.stringify(raw.data[0], null, 2)}`);
+          debug(
+            `Code scanning — first item summary: ${JSON.stringify({
+              id: raw.data[0].id,
+              number: raw.data[0].number,
+              status: raw.data[0].status,
+              repository: raw.data[0].repository?.full_name,
+            })}`
+          );
         } else if (raw.data && typeof raw.data === 'object' && !Array.isArray(raw.data)) {
           debug(`Code scanning — response is object, not array. Keys: ${Object.keys(raw.data).join(', ')}`);
-          debug(`Code scanning — response body: ${JSON.stringify(raw.data, null, 2).slice(0, 2000)}`);
         } else {
           debug(`Code scanning — response body is empty or unexpected: ${JSON.stringify(raw.data)}`);
         }
       } catch (debugErr) {
         debug(`Code scanning — raw request failed: ${debugErr.status} ${debugErr.message}`);
         if (debugErr.response) {
-          debug(`Code scanning — error response body: ${JSON.stringify(debugErr.response.data)}`);
-          debug(`Code scanning — error response headers: ${JSON.stringify(debugErr.response.headers)}`);
+          debug(
+            `Code scanning — error response: ${JSON.stringify({
+              message: debugErr.response.data?.message,
+              documentation_url: debugErr.response.data?.documentation_url,
+              request_id: debugErr.response.headers?.['x-github-request-id'],
+            })}`
+          );
         }
       }
     }
@@ -350,44 +436,7 @@ async function processCodeScanningRequests(org) {
   console.log(`     ${requests.length} open request(s) found.`);
 
   for (const req of requests) {
-    const repoFullName = req.repository.full_name;
-    const [owner, repo] = repoFullName.split('/');
-    // For code scanning dismissal requests, data[0].alert_number holds the
-    // alert number.  Fall back to resource_identifier if data is unavailable.
-    const alertNumber = Number(
-      (req.data && req.data[0] && req.data[0].alert_number != null)
-        ? req.data[0].alert_number
-        : req.resource_identifier
-    );
-    const requester = req.requester?.actor_name;
-
-    const result = validateDismissalComment(req.requester_comment);
-
-    if (result.valid) {
-      console.log(
-        `     ✅ Request #${req.number} (${repoFullName} alert #${alertNumber}) — valid comment, leaving open for human review.`
-      );
-      continue;
-    }
-
-    console.log(
-      `     ❌ Request #${req.number} (${repoFullName} alert #${alertNumber}) — DENIED: ${result.reason}`
-    );
-
-    const denialMessage = formatDenialMessage({
-      alertType: 'code_scanning',
-      alertNumber,
-      requester,
-      denialReason: result.reason,
-      repoFullName,
-    });
-
-    if (!DRY_RUN) {
-      await denyDismissalRequest(owner, repo, 'code-scanning', alertNumber, denialMessage);
-      console.log(`     🚫 Denied dismissal request #${req.number}.`);
-    } else {
-      console.log(`     [DRY RUN] Would deny dismissal request #${req.number}.`);
-    }
+    await processDismissalRequest(req, 'code_scanning');
   }
 }
 
@@ -422,40 +471,7 @@ async function processSecretScanningRequests(org) {
   console.log(`     ${requests.length} open request(s) found.`);
 
   for (const req of requests) {
-    const repoFullName = req.repository.full_name;
-    const [owner, repo] = repoFullName.split('/');
-    // For secret scanning dismissal requests, resource_identifier is the
-    // numeric alert number (unlike code scanning where it is "repo_id/alert").
-    const alertNumber = Number(req.resource_identifier);
-    const requester = req.requester?.actor_name;
-
-    const result = validateDismissalComment(req.requester_comment);
-
-    if (result.valid) {
-      console.log(
-        `     ✅ Request #${req.number} (${repoFullName} alert #${alertNumber}) — valid comment, leaving open for human review.`
-      );
-      continue;
-    }
-
-    console.log(
-      `     ❌ Request #${req.number} (${repoFullName} alert #${alertNumber}) — DENIED: ${result.reason}`
-    );
-
-    const denialMessage = formatDenialMessage({
-      alertType: 'secret_scanning',
-      alertNumber,
-      requester,
-      denialReason: result.reason,
-      repoFullName,
-    });
-
-    if (!DRY_RUN) {
-      await denyDismissalRequest(owner, repo, 'secret-scanning', alertNumber, denialMessage);
-      console.log(`     🚫 Denied dismissal request #${req.number}.`);
-    } else {
-      console.log(`     [DRY RUN] Would deny dismissal request #${req.number}.`);
-    }
+    await processDismissalRequest(req, 'secret_scanning');
   }
 }
 
@@ -490,40 +506,7 @@ async function processDependabotRequests(org) {
   console.log(`     ${requests.length} open request(s) found.`);
 
   for (const req of requests) {
-    const repoFullName = req.repository.full_name;
-    const [owner, repo] = repoFullName.split('/');
-    // For Dependabot dismissal requests, resource_identifier is the alert
-    // number as a numeric string (unlike code scanning where it is "repo_id/alert").
-    const alertNumber = Number(req.resource_identifier);
-    const requester = req.requester?.actor_name;
-
-    const result = validateDismissalComment(req.requester_comment);
-
-    if (result.valid) {
-      console.log(
-        `     ✅ Request #${req.number} (${repoFullName} alert #${alertNumber}) — valid comment, leaving open for human review.`
-      );
-      continue;
-    }
-
-    console.log(
-      `     ❌ Request #${req.number} (${repoFullName} alert #${alertNumber}) — DENIED: ${result.reason}`
-    );
-
-    const denialMessage = formatDenialMessage({
-      alertType: 'dependabot',
-      alertNumber,
-      requester,
-      denialReason: result.reason,
-      repoFullName,
-    });
-
-    if (!DRY_RUN) {
-      await denyDismissalRequest(owner, repo, 'dependabot', alertNumber, denialMessage);
-      console.log(`     🚫 Denied dismissal request #${req.number}.`);
-    } else {
-      console.log(`     [DRY RUN] Would deny dismissal request #${req.number}.`);
-    }
+    await processDismissalRequest(req, 'dependabot');
   }
 }
 
@@ -552,6 +535,16 @@ async function main() {
   console.log(`  minimum_length      : ${MINIMUM_LENGTH != null ? MINIMUM_LENGTH : '(not set)'}`);
   console.log(`  case_sensitive      : ${CASE_SENSITIVE}`);
   console.log(`  alert_types         : ${ALERT_TYPES.join(', ')}`);
+  console.log(`  review_mode         : ${REVIEW_MODE}`);
+  if (REVIEW_MODE === 'agentic' || REVIEW_MODE === 'both') {
+    console.log(
+      `  agentic_workflow    : ${agenticSettings.workflowRepository}`
+    );
+    console.log(
+      `  appsec_team         : @${agenticSettings.organization}/${agenticSettings.teamSlug}`
+    );
+    console.log(`  agentic_staged      : ${agenticSettings.staged}`);
+  }
 
   console.log(`\nChecking open dismissal requests for org: ${org}…`);
 
@@ -568,11 +561,17 @@ async function main() {
   console.log('\n✅ Done.');
 }
 
-main().catch((error) => {
-  console.error('\n[FATAL]', error.message || error);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error('\n[FATAL]', error.message || error);
+    process.exit(1);
+  });
+}
 
 // Export helpers for unit tests.
-module.exports = { validateDismissalComment, formatDenialMessage };
-
+module.exports = {
+  formatDenialMessage,
+  main,
+  processDismissalRequest,
+  validateDismissalComment,
+};

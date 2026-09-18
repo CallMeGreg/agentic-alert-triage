@@ -28,6 +28,49 @@ required_pattern: "https://github\\.com/callmegreg-demo-org/[a-zA-Z0-9._-]+/issu
 case_sensitive: false
 
 # ---------------------------------------------------------------------------
+# REVIEW MODE: Deterministic checks, agentic review, or both
+# ---------------------------------------------------------------------------
+# deterministic — current behavior: deny comments that fail the criteria above.
+# agentic       — send every open request to the agentic workflow.
+# both          — deny obvious criteria failures first, then send requests that
+#                 pass the deterministic checks to the agentic workflow.
+#
+# Agentic processing is opt-in. Keep "deterministic" until the generated
+# agentic workflow has been tested and the GitHub App permissions are updated.
+review_mode: deterministic
+
+# Agentic workflow settings. These values are used by both the polling workflow
+# that emits repository_dispatch events and the agentic workflow that handles
+# them.
+agentic:
+  # Repository containing .github/workflows/agentic-dismissal-review.lock.yml.
+  # It must belong to the monitored organization. Defaults to
+  # GITHUB_REPOSITORY when omitted.
+  # workflow_repository: my-org/alert-dismissal-automation
+
+  # Team whose members receive alerts that the agent determines are ready for
+  # human review. Code scanning and Dependabot support multiple assignees.
+  # Secret scanning currently supports one assignee, selected deterministically
+  # from eligible team members.
+  appsec_team_slug: appsec-team
+
+  # Keep staged mode enabled while piloting. The agent runs and SafeOutput
+  # previews appear in the Actions summary, but no request is denied and no
+  # alert is assigned. Set to false after reviewing trial runs.
+  staged: true
+
+  # Contact included in agentic denial messages. Defaults to
+  # "@<organization>/<appsec_team_slug>" when omitted.
+  # help_contact: "@my-org/appsec-team"
+
+  # Optional custom template for agentic denials. Available placeholders:
+  #   {requester}, {denial_reason}, {help_contact}, {alert_type},
+  #   {alert_number}, {repo_full_name}
+  # denial_message: |
+  #   Your dismissal request was denied: {denial_reason}
+  #   Please add concrete evidence and contact {help_contact} for help.
+
+# ---------------------------------------------------------------------------
 # ALERT TYPES: Which alert categories should be monitored?
 # ---------------------------------------------------------------------------
 # Supported values: code_scanning | secret_scanning | dependabot
@@ -70,4 +113,3 @@ denial_message: |
   Your request to dismiss this alert has been automatically denied.
   **Reason:** {denial_reason}
   Please create an issue using the following template and add the link to the dismissal request message: https://github.com/callmegreg-demo-org/app-xyz-repo/issues/new?template=foo.yml
-

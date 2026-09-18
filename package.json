@@ -5,7 +5,8 @@
   "main": "scripts/check-dismissals.js",
   "scripts": {
     "start": "node scripts/check-dismissals.js",
-    "test": "node --test scripts/check-dismissals.test.js"
+    "test": "node --test scripts/*.test.js",
+    "compile:agentic": "gh aw compile agentic-dismissal-review --strict --validate"
   },
   "dependencies": {
     "@octokit/rest": "^22.0.1",
