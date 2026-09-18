@@ -11,7 +11,7 @@ review, or both.
 | `both` | Deny deterministic failures immediately and dispatch passing requests for agentic review. |
 
 > [!IMPORTANT]
-> The agent never approves a dismissal request. A request judged ready remains
+> The agent never approves a dismissal request. A request judged as "ready" remains
 open and the alert is assigned to the configured AppSec team for final human
 review.
 
