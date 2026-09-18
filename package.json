@@ -1,19 +1,22 @@
 {
-  "name": "alert-dismissal-automation",
+  "name": "agentic-alert-triage",
   "version": "1.0.0",
-  "description": "Automatically deny non-compliant GitHub security alert dismissal requests",
-  "main": "scripts/check-dismissals.js",
+  "description": "Webhook-driven deterministic and agentic review for GitHub alert dismissal requests",
+  "main": "index.js",
   "scripts": {
-    "start": "node scripts/check-dismissals.js",
+    "start": "probot run ./index.js",
+    "dev": "probot run ./index.js",
     "test": "node --test scripts/*.test.js",
+    "check": "node scripts/check-syntax.js",
     "compile:agentic": "gh aw compile agentic-dismissal-review --strict --validate"
   },
   "dependencies": {
     "@octokit/rest": "^22.0.1",
-    "js-yaml": "^4.1.1"
+    "js-yaml": "^4.1.1",
+    "probot": "14.3.2"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "license": "MIT"
 }

@@ -4,16 +4,34 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   formatDenialMessage,
+  getDeterministicRules,
   validateDismissalComment,
-} = require('./check-dismissals');
+} = require('./deterministic-review');
 
-describe('validateDismissalComment', () => {
+describe('deterministic dismissal review', () => {
   const phraseRules = {
     requiredPhrase: 'mitigating control',
     requiredPattern: null,
     minimumLength: null,
     caseSensitive: false,
   };
+
+  it('normalizes configured validation rules', () => {
+    assert.deepEqual(
+      getDeterministicRules({
+        required_phrase: 'approved exception',
+        required_pattern: '^SEC-\\d+',
+        minimum_length: 20,
+        case_sensitive: true,
+      }),
+      {
+        requiredPhrase: 'approved exception',
+        requiredPattern: '^SEC-\\d+',
+        minimumLength: 20,
+        caseSensitive: true,
+      }
+    );
+  });
 
   it('accepts a comment containing the required phrase', () => {
     const result = validateDismissalComment(
@@ -25,27 +43,26 @@ describe('validateDismissalComment', () => {
   });
 
   it('accepts the required phrase regardless of case', () => {
-    const result = validateDismissalComment(
-      'MITIGATING CONTROL documented.',
-      phraseRules
+    assert.equal(
+      validateDismissalComment(
+        'MITIGATING CONTROL documented.',
+        phraseRules
+      ).valid,
+      true
     );
-    assert.equal(result.valid, true);
   });
 
-  it('rejects a comment missing the required phrase', () => {
-    const result = validateDismissalComment(
-      'This is not relevant.',
-      phraseRules
+  it('rejects missing and empty comments when criteria are configured', () => {
+    assert.match(
+      validateDismissalComment('This is not relevant.', phraseRules).reason,
+      /required phrase/
     );
-    assert.equal(result.valid, false);
-    assert.match(result.reason, /required phrase/);
-  });
-
-  it('rejects empty comments when criteria are configured', () => {
-    assert.equal(validateDismissalComment(null, phraseRules).valid, false);
-    assert.equal(validateDismissalComment(undefined, phraseRules).valid, false);
-    assert.equal(validateDismissalComment('', phraseRules).valid, false);
-    assert.equal(validateDismissalComment('   ', phraseRules).valid, false);
+    for (const comment of [null, undefined, '', '   ']) {
+      assert.equal(
+        validateDismissalComment(comment, phraseRules).valid,
+        false
+      );
+    }
   });
 
   it('enforces minimum length and regular expression rules', () => {
@@ -81,11 +98,9 @@ describe('validateDismissalComment', () => {
     assert.equal(result.valid, false);
     assert.match(result.reason, /not a valid regular expression/);
   });
-});
 
-describe('formatDenialMessage', () => {
-  it('substitutes all supported placeholders', () => {
-    const msg = formatDenialMessage(
+  it('substitutes denial message placeholders', () => {
+    const message = formatDenialMessage(
       {
         alertType: 'code_scanning',
         alertNumber: 42,
@@ -101,13 +116,13 @@ describe('formatDenialMessage', () => {
     );
 
     assert.equal(
-      msg,
+      message,
       'code scanning #42 octocat mitigating control Missing required phrase. my-org/my-repo'
     );
   });
 
-  it('uses the built-in template when no custom template is configured', () => {
-    const msg = formatDenialMessage(
+  it('uses the built-in denial template when none is configured', () => {
+    const message = formatDenialMessage(
       {
         alertType: 'dependabot',
         alertNumber: 7,
@@ -118,9 +133,9 @@ describe('formatDenialMessage', () => {
       {}
     );
 
-    assert.match(msg, /dependabot/);
-    assert.match(msg, /#7/);
-    assert.match(msg, /Too short/);
-    assert.match(msg, /org\/repo/);
+    assert.match(message, /dependabot/);
+    assert.match(message, /#7/);
+    assert.match(message, /Too short/);
+    assert.match(message, /org\/repo/);
   });
 });

@@ -6,9 +6,10 @@ const {
   assignAlertToTeam,
   buildDispatchPayload,
   buildReviewContext,
-  extractAlertNumber,
+  DEFAULT_WORKFLOW_REPOSITORY,
   extractIssueReferences,
   getAgenticSettings,
+  getAlert,
   isAssignedToTeam,
   isStaleDismissalReviewError,
   mergeAssignees,
@@ -18,15 +19,31 @@ const {
   validateDispatchEvent,
 } = require('./agentic-review');
 
+const WORKFLOW_REPOSITORY = 'CallMeGreg/agentic-alert-triage';
+
+function agenticConfig(overrides = {}) {
+  return {
+    review_mode: 'agentic',
+    organization: 'octo-org',
+    alert_types: ['code_scanning', 'secret_scanning', 'dependabot'],
+    agentic: {
+      workflow_repository: WORKFLOW_REPOSITORY,
+      ...overrides,
+    },
+  };
+}
+
 function createDispatchEvent(overrides = {}) {
   return {
     action: 'alert-dismissal-requested',
+    repository: { full_name: WORKFLOW_REPOSITORY },
     sender: { login: 'alert-dismissal-bot[bot]' },
     client_payload: {
       schema_version: 1,
       target: {
         organization: 'octo-org',
         repository: 'octo-org/service',
+        repository_id: 101,
         alert_type: 'code_scanning',
         alert_number: 8,
         dismissal_request_id: 20,
@@ -35,7 +52,10 @@ function createDispatchEvent(overrides = {}) {
       request: {
         id: 20,
         number: 2,
+        repository_id: 101,
         status: 'open',
+        request_type: 'dismiss',
+        exemption_request_data_type: 'code_scanning_alert_dismissal',
         requester: { actor_name: 'octocat' },
         requester_comment: 'The finding is limited to test code.',
         dismissal_reasons: ['tests'],
@@ -44,8 +64,10 @@ function createDispatchEvent(overrides = {}) {
         appsec_team_members: ['security-one', 'security-two'],
       },
       source: {
-        repository: 'octo-org/automation',
-        run_id: '123',
+        repository: WORKFLOW_REPOSITORY,
+        webhook_event: 'dismissal_request_code_scanning',
+        delivery_id: 'delivery-123',
+        installation_id: 44,
       },
       dry_run: false,
       ...overrides,
@@ -53,206 +75,303 @@ function createDispatchEvent(overrides = {}) {
   };
 }
 
+function validationEnv() {
+  return {
+    EXPECTED_DISPATCH_SENDER: 'alert-dismissal-bot[bot]',
+    GITHUB_REPOSITORY: WORKFLOW_REPOSITORY,
+  };
+}
+
 describe('agentic configuration', () => {
-  it('defaults to deterministic review and a staged appsec-team workflow', () => {
-    const settings = getAgenticSettings(
-      {},
-      { GITHUB_REPOSITORY: 'octo-org/automation' }
-    );
+  it('defaults to deterministic review and the central workflow repository', () => {
+    const settings = getAgenticSettings({}, {});
 
     assert.equal(settings.reviewMode, 'deterministic');
     assert.equal(settings.teamSlug, 'appsec-team');
+    assert.equal(settings.workflowRepository, DEFAULT_WORKFLOW_REPOSITORY);
     assert.equal(settings.staged, true);
-    assert.equal(settings.helpContact, '@octo-org/appsec-team');
+    assert.equal(settings.helpContact, '@appsec-team');
   });
 
-  it('requires a workflow repository for agentic modes', () => {
+  it('requires a trusted organization for agentic modes', () => {
     assert.throws(
-      () =>
-        getAgenticSettings(
-          { review_mode: 'agentic', organization: 'octo-org' },
-          {}
-        ),
-      /workflow_repository/
+      () => getAgenticSettings({ review_mode: 'agentic' }, {}),
+      /requires organization/
     );
   });
 
-  it('rejects unknown review modes', () => {
+  it('allows the control repository to use a different owner', () => {
+    const settings = getAgenticSettings(
+      {
+        review_mode: 'agentic',
+        organization: 'octo-org',
+        agentic: { workflow_repository: 'control-owner/automation' },
+      },
+      {}
+    );
+
+    assert.equal(settings.workflowRepository, 'control-owner/automation');
+  });
+
+  it('rejects unknown review modes and invalid trusted identifiers', () => {
     assert.throws(
-      () =>
-        getAgenticSettings(
-          { review_mode: 'automatic' },
-          { GITHUB_REPOSITORY: 'octo-org/automation' }
-        ),
+      () => getAgenticSettings({ review_mode: 'automatic' }, {}),
       /Invalid review_mode/
     );
-  });
-
-  it('rejects invalid organization names', () => {
     assert.throws(
       () =>
         getAgenticSettings(
           {
             review_mode: 'agentic',
             organization: 'octo-org\nowner=attacker',
-            agentic: { workflow_repository: 'octo-org/automation' },
           },
           {}
         ),
-      /Invalid GitHub organization name/
+      /Invalid GitHub organization/
     );
-  });
-
-  it('requires the workflow repository to use the monitored organization', () => {
     assert.throws(
       () =>
         getAgenticSettings(
           {
-            review_mode: 'agentic',
-            organization: 'octo-org',
-            agentic: { workflow_repository: 'another-org/automation' },
+            agentic: { appsec_team_slug: '../appsec' },
           },
           {}
         ),
-      /must be in the monitored organization/
+      /Invalid AppSec team slug/
     );
   });
 });
 
 describe('dispatch payloads', () => {
-  it('contains a sanitized request and AppSec membership snapshot', () => {
+  it('contains a sanitized request, source provenance, and team snapshot', () => {
     const payload = buildDispatchPayload({
       organization: 'octo-org',
-      sourceRepository: 'octo-org/automation',
+      sourceRepository: WORKFLOW_REPOSITORY,
       repository: 'octo-org/service',
+      repositoryId: 101,
       alertType: 'code_scanning',
       alertNumber: 12,
       dismissalRequest: {
         id: 99,
         number: 4,
+        repository_id: 101,
+        requester_id: 55,
+        requester_login: 'octocat',
+        request_type: 'dismiss',
         status: 'open',
-        requester: { actor_name: 'octocat' },
         requester_comment:
           'Rotated github_pat_12345678901234567890 and documented the result.',
-        data: [{ reason: 'revoked', secret: 'must-not-pass-through' }],
+        exemption_request_data: {
+          type: 'code_scanning_alert_dismissal',
+          data: [{ alert_number: 12, reason: 'revoked', secret: 'omit-me' }],
+        },
+        metadata: { untrusted: 'omit-me-too' },
+        responses: [{ body: 'opaque' }],
       },
       teamLogins: ['security-two', 'security-one'],
-      dryRun: false,
-      runId: '123',
+      webhookEvent: 'dismissal_request_code_scanning',
+      deliveryId: 'delivery-123',
+      installationId: 44,
     });
 
     assert.equal(payload.schema_version, 1);
     assert.equal(payload.target.repository, 'octo-org/service');
+    assert.equal(payload.target.repository_id, 101);
     assert.equal(payload.target.alert_number, 12);
     assert.equal(payload.request.id, 99);
+    assert.equal(
+      payload.request.exemption_request_data_type,
+      'code_scanning_alert_dismissal'
+    );
     assert.deepEqual(payload.request.dismissal_reasons, ['revoked']);
     assert.deepEqual(payload.review.appsec_team_members, [
       'security-one',
       'security-two',
     ]);
-    assert.equal(payload.request.requester_comment.includes('github_pat_'), false);
-    assert.equal(JSON.stringify(payload).includes('must-not-pass-through'), false);
+    assert.deepEqual(payload.source, {
+      repository: WORKFLOW_REPOSITORY,
+      webhook_event: 'dismissal_request_code_scanning',
+      installation_id: 44,
+      delivery_id: 'delivery-123',
+    });
+    const serialized = JSON.stringify(payload);
+    assert.doesNotMatch(serialized, /github_pat_/);
+    assert.doesNotMatch(serialized, /omit-me/);
+    assert.doesNotMatch(serialized, /responses/);
+    assert.ok(serialized.length <= 60000);
   });
 
-  it('validates the target organization and identifiers', () => {
-    const event = createDispatchEvent();
-    event.client_payload.target.alert_type = 'secret_scanning';
-    const config = {
-      review_mode: 'agentic',
+  it('rejects inconsistent event, request type, and repository identity', () => {
+    const base = {
       organization: 'octo-org',
-      alert_types: ['secret_scanning'],
-      agentic: { workflow_repository: 'octo-org/automation' },
+      sourceRepository: WORKFLOW_REPOSITORY,
+      repository: 'octo-org/service',
+      repositoryId: 101,
+      alertType: 'code_scanning',
+      alertNumber: 12,
+      dismissalRequest: {
+        id: 99,
+        number: 4,
+        repository_id: 101,
+        requester_login: 'octocat',
+        request_type: 'dismiss',
+        status: 'open',
+        exemption_request_data: {
+          type: 'code_scanning_alert_dismissal',
+          data: [{ alert_number: 12 }],
+        },
+      },
+      teamLogins: ['security-one'],
+      webhookEvent: 'dismissal_request_code_scanning',
+      installationId: 44,
     };
-    const target = validateDispatchEvent(event, config, {
-      EXPECTED_DISPATCH_SENDER: 'alert-dismissal-bot[bot]',
-      GITHUB_REPOSITORY: 'octo-org/automation',
-    });
+
+    assert.throws(
+      () =>
+        buildDispatchPayload({
+          ...base,
+          webhookEvent: 'dismissal_request_dependabot',
+        }),
+      /does not match alert type/
+    );
+    assert.throws(
+      () =>
+        buildDispatchPayload({
+          ...base,
+          dismissalRequest: {
+            ...base.dismissalRequest,
+            exemption_request_data: {
+              type: 'dependabot_alert_dismissal',
+              data: [{ alert_number: 12 }],
+            },
+          },
+        }),
+      /does not match alert type/
+    );
+    assert.throws(
+      () =>
+        buildDispatchPayload({
+          ...base,
+          repository: 'another-org/service',
+        }),
+      /outside organization/
+    );
+  });
+
+  it('validates dispatch targets and source provenance', () => {
+    const event = createDispatchEvent();
+    const target = validateDispatchEvent(
+      event,
+      agenticConfig(),
+      validationEnv()
+    );
 
     assert.equal(target.repository, 'octo-org/service');
+    assert.equal(target.repositoryId, 101);
     assert.equal(target.alertNumber, 8);
     assert.equal(target.dismissalRequest.requester.actor_name, 'octocat');
-    assert.deepEqual(target.teamLogins, ['security-one', 'security-two']);
+    assert.equal(target.webhookEvent, 'dismissal_request_code_scanning');
+    assert.equal(target.deliveryId, 'delivery-123');
+    assert.equal(target.sourceInstallationId, 44);
+    assert.deepEqual(target.teamLogins, [
+      'security-one',
+      'security-two',
+    ]);
 
     event.client_payload.target.repository = 'another-org/service';
     assert.throws(
       () =>
-        validateDispatchEvent(event, config, {
-          EXPECTED_DISPATCH_SENDER: 'alert-dismissal-bot[bot]',
-          GITHUB_REPOSITORY: 'octo-org/automation',
-        }),
+        validateDispatchEvent(event, agenticConfig(), validationEnv()),
       /outside configured organization/
     );
   });
 
-  it('rejects dispatches not sent by the configured GitHub App', () => {
-    const event = createDispatchEvent();
-    event.sender.login = 'octocat';
-    const config = {
-      review_mode: 'agentic',
-      organization: 'octo-org',
-      alert_types: ['code_scanning'],
-      agentic: { workflow_repository: 'octo-org/automation' },
-    };
-
-    assert.throws(
-      () =>
-        validateDispatchEvent(event, config, {
-          EXPECTED_DISPATCH_SENDER: 'alert-dismissal-bot[bot]',
-          GITHUB_REPOSITORY: 'octo-org/automation',
-        }),
-      /does not match the configured GitHub App identity/
-    );
-  });
-
-  it('rejects dispatches when agentic review is disabled', () => {
-    const event = createDispatchEvent();
-
+  it('rejects an unexpected sender, source event, or request data type', () => {
+    const wrongSender = createDispatchEvent();
+    wrongSender.sender.login = 'octocat';
     assert.throws(
       () =>
         validateDispatchEvent(
-          event,
-          {
-            review_mode: 'deterministic',
-            organization: 'octo-org',
-          },
-          { GITHUB_REPOSITORY: 'octo-org/automation' }
+          wrongSender,
+          agenticConfig(),
+          validationEnv()
+        ),
+      /does not match the configured GitHub App identity/
+    );
+
+    const wrongEvent = createDispatchEvent();
+    wrongEvent.client_payload.source.webhook_event =
+      'dismissal_request_dependabot';
+    assert.throws(
+      () =>
+        validateDispatchEvent(
+          wrongEvent,
+          agenticConfig(),
+          validationEnv()
+        ),
+      /webhook event does not match/
+    );
+
+    const wrongType = createDispatchEvent();
+    wrongType.client_payload.request.exemption_request_data_type =
+      'dependabot_alert_dismissal';
+    assert.throws(
+      () =>
+        validateDispatchEvent(
+          wrongType,
+          agenticConfig(),
+          validationEnv()
+        ),
+      /snapshot type does not match/
+    );
+  });
+
+  it('rejects dispatches when agentic review or the alert type is disabled', () => {
+    assert.throws(
+      () =>
+        validateDispatchEvent(
+          createDispatchEvent(),
+          { review_mode: 'deterministic', organization: 'octo-org' },
+          validationEnv()
         ),
       /Agentic review is disabled/
+    );
+    assert.throws(
+      () =>
+        validateDispatchEvent(
+          createDispatchEvent(),
+          {
+            ...agenticConfig(),
+            alert_types: ['secret_scanning'],
+          },
+          validationEnv()
+        ),
+      /not enabled/
     );
   });
 });
 
 describe('alert handling', () => {
-  it('extracts alert numbers for every supported alert type', () => {
+  it('always hides secret values when reading secret scanning alerts', async () => {
+    const requests = [];
+    const octokit = {
+      request: async (endpoint, parameters) => {
+        requests.push({ endpoint, parameters });
+        return { data: { number: parameters.alert_number } };
+      },
+    };
+
+    await getAlert(octokit, 'octo-org', 'service', 'secret_scanning', 5);
+    await getAlert(octokit, 'octo-org', 'service', 'code_scanning', 6);
+
+    assert.equal(requests[0].parameters.hide_secret, true);
     assert.equal(
-      extractAlertNumber('code_scanning', {
-        data: [{ alert_number: '42' }],
-        resource_identifier: '1/99',
-      }),
-      42
-    );
-    assert.equal(
-      extractAlertNumber('code_scanning', {
-        data: null,
-        resource_identifier: '123/77',
-      }),
-      77
-    );
-    assert.equal(
-      extractAlertNumber('secret_scanning', {
-        resource_identifier: '9',
-      }),
-      9
-    );
-    assert.equal(
-      extractAlertNumber('dependabot', {
-        data: [{ alert_number: '11' }],
-      }),
-      11
+      Object.hasOwn(requests[1].parameters, 'hide_secret'),
+      false
     );
   });
 
-  it('redacts the detected secret from secret scanning context', () => {
+  it('redacts secret scanning values from alert context', () => {
     const sanitized = sanitizeAlert('secret_scanning', {
       number: 5,
       state: 'open',
@@ -262,7 +381,7 @@ describe('alert handling', () => {
     });
 
     assert.equal(sanitized.secret, undefined);
-    assert.equal(JSON.stringify(sanitized).includes('secret-value'), false);
+    assert.doesNotMatch(JSON.stringify(sanitized), /secret-value/);
     assert.equal(sanitized.assigned_to, 'octocat');
   });
 
@@ -278,14 +397,23 @@ describe('alert handling', () => {
         teamSlug: 'appsec-team',
         staged: true,
         dryRun: false,
+        webhookEvent: 'dismissal_request_secret_scanning',
+        deliveryId: 'delivery-123',
+        sourceInstallationId: 44,
       },
       dismissalRequest: {
         id: 20,
         number: 2,
+        repository_id: 101,
+        requester_login: 'octocat',
         status: 'open',
+        request_type: 'dismiss',
         requester_comment:
           'Rotated actual-secret and github_pat_12345678901234567890.',
-        data: [{ secret: 'must-not-pass-through' }],
+        exemption_request_data: {
+          type: 'secret_scanning_closure',
+          data: [{ alert_number: 8, secret: 'must-not-pass-through' }],
+        },
       },
       alert: {
         number: 8,
@@ -306,9 +434,14 @@ describe('alert handling', () => {
     assert.doesNotMatch(serialized, /github_pat_/);
     assert.doesNotMatch(serialized, /ghp_/);
     assert.match(serialized, /\[REDACTED SECRET\]/);
+    assert.deepEqual(context.source, {
+      webhook_event: 'dismissal_request_secret_scanning',
+      delivery_id: 'delivery-123',
+      installation_id: 44,
+    });
   });
 
-  it('detects AppSec assignment case-insensitively', () => {
+  it('detects AppSec assignment and preserves existing assignees', () => {
     assert.equal(
       isAssignedToTeam(
         'code_scanning',
@@ -325,9 +458,6 @@ describe('alert handling', () => {
       ),
       false
     );
-  });
-
-  it('preserves existing assignees while adding the AppSec team', () => {
     assert.deepEqual(
       mergeAssignees(['existing', 'alice'], ['alice', 'bob']),
       ['alice', 'bob', 'existing']
@@ -345,7 +475,7 @@ describe('alert handling', () => {
     );
   });
 
-  it('assigns snapshotted team members without collaborator permission reads', async () => {
+  it('assigns snapshotted team members without collaborator reads', async () => {
     const requests = [];
     const octokit = {
       request: async (endpoint, parameters) => {
@@ -378,10 +508,31 @@ describe('alert handling', () => {
       'security-two',
     ]);
   });
+
+  it('surfaces alert assignment endpoint failures', async () => {
+    await assert.rejects(
+      assignAlertToTeam({
+        octokit: {
+          request: async () => {
+            throw new Error('assignment rejected');
+          },
+        },
+        owner: 'octo-org',
+        repo: 'service',
+        organization: 'octo-org',
+        teamSlug: 'appsec-team',
+        alertType: 'dependabot',
+        alertNumber: 8,
+        alert: { assignees: [] },
+        teamMembers: ['security-one'],
+      }),
+      /assignment rejected/
+    );
+  });
 });
 
 describe('evidence and decision sanitization', () => {
-  it('fetches only unique same-organization issue references', () => {
+  it('extracts only unique same-organization issue references', () => {
     const references = extractIssueReferences(
       [
         'https://github.com/octo-org/service/issues/12',
@@ -393,7 +544,9 @@ describe('evidence and decision sanitization', () => {
     );
 
     assert.deepEqual(
-      references.map((reference) => `${reference.repo}#${reference.issue_number}`),
+      references.map(
+        (reference) => `${reference.repo}#${reference.issue_number}`
+      ),
       ['service#12', 'another#3']
     );
   });

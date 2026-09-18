@@ -7,11 +7,14 @@ const yaml = require('js-yaml');
 const API_VERSION = '2026-03-10';
 const DISPATCH_EVENT_TYPE = 'alert-dismissal-requested';
 const DISPATCH_SCHEMA_VERSION = 1;
+const DEFAULT_WORKFLOW_REPOSITORY = 'CallMeGreg/agentic-alert-triage';
 const MAX_DISPATCH_PAYLOAD_LENGTH = 60000;
 const MAX_DENIAL_MESSAGE_LENGTH = 2048;
 const MAX_AGENT_REASON_LENGTH = 1200;
 const MAX_EVIDENCE_ISSUES = 5;
 const MAX_EVIDENCE_BODY_LENGTH = 6000;
+const MAX_ALERT_NUMBER = 2147483647;
+const MAX_DELIVERY_ID_LENGTH = 128;
 const SECRET_PATTERNS = [
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
@@ -23,14 +26,20 @@ const ALERT_TYPE_METADATA = {
   code_scanning: {
     dismissalSegment: 'code-scanning',
     alertPath: 'code-scanning',
+    webhookEvent: 'dismissal_request_code_scanning',
+    requestDataType: 'code_scanning_alert_dismissal',
   },
   secret_scanning: {
     dismissalSegment: 'secret-scanning',
     alertPath: 'secret-scanning',
+    webhookEvent: 'dismissal_request_secret_scanning',
+    requestDataType: 'secret_scanning_closure',
   },
   dependabot: {
     dismissalSegment: 'dependabot',
     alertPath: 'dependabot',
+    webhookEvent: 'dismissal_request_dependabot',
+    requestDataType: 'dependabot_alert_dismissal',
   },
 };
 
@@ -75,23 +84,17 @@ function getAgenticSettings(config, env = process.env) {
       : null;
   const teamSlug = agentic.appsec_team_slug || 'appsec-team';
   const workflowRepository =
-    agentic.workflow_repository || env.GITHUB_REPOSITORY || null;
+    agentic.workflow_repository || DEFAULT_WORKFLOW_REPOSITORY;
+
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/.test(teamSlug)) {
+    throw new Error(`Invalid AppSec team slug "${teamSlug}".`);
+  }
+  splitRepository(workflowRepository);
 
   if (reviewMode === 'agentic' || reviewMode === 'both') {
     if (!organization) {
       throw new Error(
         'Agentic review requires organization or GITHUB_REPOSITORY.'
-      );
-    }
-    if (!workflowRepository) {
-      throw new Error(
-        'Agentic review requires agentic.workflow_repository or GITHUB_REPOSITORY.'
-      );
-    }
-    const workflowOwner = splitRepository(workflowRepository).owner;
-    if (workflowOwner.toLowerCase() !== organization.toLowerCase()) {
-      throw new Error(
-        'agentic.workflow_repository must be in the monitored organization because one installation token performs both discovery and dispatch.'
       );
     }
   }
@@ -123,28 +126,14 @@ function getAlertTypeMetadata(alertType) {
 
 function splitRepository(repoFullName) {
   const parts = String(repoFullName || '').split('/');
-  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+  if (
+    parts.length !== 2 ||
+    !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(parts[0]) ||
+    !/^[A-Za-z0-9._-]{1,100}$/.test(parts[1])
+  ) {
     throw new Error(`Invalid repository name "${repoFullName}". Expected owner/repo.`);
   }
   return { owner: parts[0], repo: parts[1] };
-}
-
-function extractAlertNumber(alertType, request) {
-  getAlertTypeMetadata(alertType);
-
-  if (alertType === 'code_scanning') {
-    const alertData = Array.isArray(request.data)
-      ? request.data.find((item) => item && item.alert_number != null)
-      : null;
-    const value = alertData?.alert_number ?? request.resource_identifier;
-    const trailingNumber = String(value || '').match(/(\d+)$/);
-    return trailingNumber ? Number(trailingNumber[1]) : NaN;
-  }
-
-  const alertData = Array.isArray(request.data)
-    ? request.data.find((item) => item && item.alert_number != null)
-    : null;
-  return Number(alertData?.alert_number ?? request.resource_identifier);
 }
 
 function isOpenDismissalRequest(request) {
@@ -170,20 +159,100 @@ function normalizeTeamLogins(teamLogins) {
   return normalized.sort((a, b) => a.localeCompare(b));
 }
 
+function normalizePositiveInteger(value, label, maximum = Number.MAX_SAFE_INTEGER) {
+  const normalized = Number(value);
+  if (
+    !Number.isSafeInteger(normalized) ||
+    normalized <= 0 ||
+    normalized > maximum
+  ) {
+    throw new Error(`Invalid ${label} "${value}".`);
+  }
+  return normalized;
+}
+
+function normalizeDeliveryId(value) {
+  if (value == null || value === '') return null;
+  const deliveryId = String(value);
+  if (
+    deliveryId.length > MAX_DELIVERY_ID_LENGTH ||
+    !/^[A-Za-z0-9._:-]+$/.test(deliveryId)
+  ) {
+    throw new Error('Invalid webhook delivery ID.');
+  }
+  return deliveryId;
+}
+
 function buildDispatchPayload({
   organization,
   sourceRepository,
   repository,
+  repositoryId,
   alertType,
   alertNumber,
   dismissalRequest,
   teamLogins,
+  webhookEvent,
+  deliveryId = null,
+  installationId,
   dryRun = false,
-  runId = null,
 }) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(organization)) {
+    throw new Error(`Invalid GitHub organization name "${organization}".`);
+  }
+  const targetRepository = splitRepository(repository);
+  if (targetRepository.owner.toLowerCase() !== organization.toLowerCase()) {
+    throw new Error(
+      `Target repository ${repository} is outside organization ${organization}.`
+    );
+  }
+  const source = splitRepository(sourceRepository);
+  const metadata = getAlertTypeMetadata(alertType);
+  if (webhookEvent !== metadata.webhookEvent) {
+    throw new Error(
+      `Webhook event "${webhookEvent}" does not match alert type "${alertType}".`
+    );
+  }
+
+  const normalizedRepositoryId = normalizePositiveInteger(
+    repositoryId,
+    'repository ID'
+  );
+  const normalizedAlertNumber = normalizePositiveInteger(
+    alertNumber,
+    'alert number',
+    MAX_ALERT_NUMBER
+  );
+  const normalizedInstallationId = normalizePositiveInteger(
+    installationId,
+    'installation ID'
+  );
+  const normalizedDeliveryId = normalizeDeliveryId(deliveryId);
   const normalizedTeamLogins = normalizeTeamLogins(teamLogins);
   if (normalizedTeamLogins.length === 0) {
     throw new Error('The configured AppSec team has no members.');
+  }
+
+  const request = sanitizeDismissalRequest(dismissalRequest);
+  const dismissalRequestId = normalizePositiveInteger(
+    request.id,
+    'dismissal request ID'
+  );
+  const dismissalRequestNumber = normalizePositiveInteger(
+    request.number,
+    'dismissal request number'
+  );
+  if (
+    request.repository_id != null &&
+    normalizePositiveInteger(request.repository_id, 'request repository ID') !==
+      normalizedRepositoryId
+  ) {
+    throw new Error('Dismissal request repository ID does not match the target.');
+  }
+  if (request.exemption_request_data_type !== metadata.requestDataType) {
+    throw new Error(
+      `Dismissal request data type "${request.exemption_request_data_type}" does not match alert type "${alertType}".`
+    );
   }
 
   const payload = {
@@ -191,21 +260,26 @@ function buildDispatchPayload({
     target: {
       organization,
       repository,
+      repository_id: normalizedRepositoryId,
       alert_type: alertType,
-      alert_number: alertNumber,
-      dismissal_request_id: dismissalRequest.id,
-      dismissal_request_number: dismissalRequest.number,
+      alert_number: normalizedAlertNumber,
+      dismissal_request_id: dismissalRequestId,
+      dismissal_request_number: dismissalRequestNumber,
     },
-    request: sanitizeDismissalRequest(dismissalRequest),
+    request,
     review: {
       appsec_team_members: normalizedTeamLogins,
     },
     source: {
-      repository: sourceRepository,
-      run_id: runId,
+      repository: `${source.owner}/${source.repo}`,
+      webhook_event: webhookEvent,
+      installation_id: normalizedInstallationId,
     },
     dry_run: dryRun,
   };
+  if (normalizedDeliveryId) {
+    payload.source.delivery_id = normalizedDeliveryId;
+  }
 
   if (JSON.stringify(payload).length > MAX_DISPATCH_PAYLOAD_LENGTH) {
     throw new Error(
@@ -401,19 +475,33 @@ function redactSensitiveText(value, sensitiveValues = []) {
 }
 
 function sanitizeDismissalRequest(request, sensitiveValues = []) {
+  const requestData = Array.isArray(request.exemption_request_data?.data)
+    ? request.exemption_request_data.data
+    : Array.isArray(request.data)
+      ? request.data
+      : [];
   const reasonValues = Array.isArray(request.dismissal_reasons)
     ? request.dismissal_reasons
-    : Array.isArray(request.data)
-      ? request.data.map((item) => item?.reason)
-      : [];
+    : requestData.map((item) => item?.reason);
+  const requesterLogin =
+    request.requester_login ||
+    request.requester?.actor_name ||
+    request.requester?.login ||
+    null;
+  const requestDataType =
+    request.exemption_request_data?.type ||
+    request.exemption_request_data_type ||
+    null;
 
   return {
     id: request.id,
     number: request.number,
-    status: request.status,
-    request_type: request.request_type,
-    requester: request.requester
-      ? { actor_name: request.requester.actor_name }
+    repository_id: request.repository_id,
+    status: truncate(request.status, 50),
+    request_type: truncate(request.request_type, 100),
+    exemption_request_data_type: truncate(requestDataType, 100),
+    requester: requesterLogin
+      ? { actor_name: truncate(requesterLogin, 100) }
       : null,
     requester_comment: truncate(
       redactSensitiveText(request.requester_comment, sensitiveValues),
@@ -426,9 +514,9 @@ function sanitizeDismissalRequest(request, sensitiveValues = []) {
           .map((reason) => truncate(redactSensitiveText(reason), 100))
       ),
     ].slice(0, 10),
-    created_at: request.created_at,
-    expires_at: request.expires_at,
-    html_url: request.html_url,
+    created_at: truncate(request.created_at, 100),
+    expires_at: truncate(request.expires_at, 100),
+    html_url: truncate(request.html_url, 500),
   };
 }
 
@@ -650,6 +738,11 @@ function validateDispatchEvent(event, config, env = process.env) {
       `Unsupported dispatch schema_version "${payload.schema_version}".`
     );
   }
+  if (JSON.stringify(payload).length > MAX_DISPATCH_PAYLOAD_LENGTH) {
+    throw new Error(
+      `Dispatch payload exceeds the ${MAX_DISPATCH_PAYLOAD_LENGTH}-character safety limit.`
+    );
+  }
 
   const dispatchedTarget = payload.target || {};
   if (
@@ -687,7 +780,7 @@ function validateDispatchEvent(event, config, env = process.env) {
     );
   }
 
-  getAlertTypeMetadata(dispatchedTarget.alert_type);
+  const alertMetadata = getAlertTypeMetadata(dispatchedTarget.alert_type);
   if (
     Array.isArray(config.alert_types) &&
     !config.alert_types.includes(dispatchedTarget.alert_type)
@@ -697,23 +790,23 @@ function validateDispatchEvent(event, config, env = process.env) {
     );
   }
 
-  const alertNumber = Number(dispatchedTarget.alert_number);
-  const dismissalRequestId = Number(
-    dispatchedTarget.dismissal_request_id
+  const repositoryId = normalizePositiveInteger(
+    dispatchedTarget.repository_id,
+    'repository ID'
   );
-  const dismissalRequestNumber = Number(
-    dispatchedTarget.dismissal_request_number
+  const alertNumber = normalizePositiveInteger(
+    dispatchedTarget.alert_number,
+    'alert number',
+    MAX_ALERT_NUMBER
   );
-  if (
-    !Number.isInteger(alertNumber) ||
-    alertNumber <= 0 ||
-    !Number.isInteger(dismissalRequestId) ||
-    dismissalRequestId <= 0 ||
-    !Number.isInteger(dismissalRequestNumber) ||
-    dismissalRequestNumber <= 0
-  ) {
-    throw new Error('Dispatch payload contains invalid alert or request identifiers.');
-  }
+  const dismissalRequestId = normalizePositiveInteger(
+    dispatchedTarget.dismissal_request_id,
+    'dismissal request ID'
+  );
+  const dismissalRequestNumber = normalizePositiveInteger(
+    dispatchedTarget.dismissal_request_number,
+    'dismissal request number'
+  );
 
   const dismissalRequest = sanitizeDismissalRequest(payload.request || {});
   if (
@@ -722,6 +815,24 @@ function validateDispatchEvent(event, config, env = process.env) {
   ) {
     throw new Error(
       'Dispatch request snapshot does not match the target request identifiers.'
+    );
+  }
+  if (
+    normalizePositiveInteger(
+      dismissalRequest.repository_id,
+      'request repository ID'
+    ) !== repositoryId
+  ) {
+    throw new Error(
+      'Dispatch request snapshot does not match the target repository ID.'
+    );
+  }
+  if (
+    dismissalRequest.exemption_request_data_type !==
+    alertMetadata.requestDataType
+  ) {
+    throw new Error(
+      'Dispatch request snapshot type does not match the target alert type.'
     );
   }
 
@@ -743,6 +854,35 @@ function validateDispatchEvent(event, config, env = process.env) {
     );
   }
 
+  const source = payload.source || {};
+  if (
+    typeof source.repository !== 'string' ||
+    source.repository.toLowerCase() !==
+      settings.workflowRepository.toLowerCase()
+  ) {
+    throw new Error(
+      'Dispatch source repository does not match agentic.workflow_repository.'
+    );
+  }
+  if (
+    event.repository?.full_name &&
+    source.repository.toLowerCase() !== event.repository.full_name.toLowerCase()
+  ) {
+    throw new Error(
+      'Dispatch source repository does not match the receiving repository.'
+    );
+  }
+  if (source.webhook_event !== alertMetadata.webhookEvent) {
+    throw new Error(
+      'Dispatch webhook event does not match the target alert type.'
+    );
+  }
+  const sourceInstallationId = normalizePositiveInteger(
+    source.installation_id,
+    'source installation ID'
+  );
+  const deliveryId = normalizeDeliveryId(source.delivery_id);
+
   return {
     ...settings,
     payload,
@@ -751,11 +891,15 @@ function validateDispatchEvent(event, config, env = process.env) {
     repository: `${owner}/${repo}`,
     alertType: dispatchedTarget.alert_type,
     alertNumber,
+    repositoryId,
     dismissalRequestId,
     dismissalRequestNumber,
     dismissalRequest,
     teamLogins,
     dryRun: payload.dry_run === true || payload.dry_run === 'true',
+    webhookEvent: source.webhook_event,
+    deliveryId,
+    sourceInstallationId,
   };
 }
 
@@ -781,6 +925,11 @@ function buildReviewContext({
       dismissal_request_number: target.dismissalRequestNumber,
       appsec_team_slug: target.teamSlug,
       staged: target.staged || target.dryRun,
+    },
+    source: {
+      webhook_event: target.webhookEvent,
+      delivery_id: target.deliveryId,
+      installation_id: target.sourceInstallationId,
     },
     dismissal_request: sanitizeDismissalRequest(
       dismissalRequest,
@@ -911,6 +1060,7 @@ function isStaleDismissalReviewError(error) {
 module.exports = {
   ALERT_TYPE_METADATA,
   API_VERSION,
+  DEFAULT_WORKFLOW_REPOSITORY,
   DISPATCH_EVENT_TYPE,
   appendNoop,
   assignAlertToTeam,
@@ -918,7 +1068,6 @@ module.exports = {
   buildReviewContext,
   denyDismissalRequest,
   dispatchAgenticReview,
-  extractAlertNumber,
   extractIssueReferences,
   fetchIssueEvidence,
   formatAgenticDenialMessage,

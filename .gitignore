@@ -1,4 +1,9 @@
 node_modules/
+.env
+.env.*
+!.env.example
+coverage/
+npm-debug.log*
 
 # Ignore private keys
 *.pem

@@ -1,0 +1,27 @@
+# GitHub App manifest used by Probot's local setup flow.
+# Updating this file does not update an existing GitHub App registration.
+
+name: Agentic Alert Triage
+url: https://github.com/CallMeGreg/agentic-alert-triage
+description: Webhook-driven deterministic and agentic review of delegated security alert dismissal requests.
+public: false
+
+default_events:
+  - dismissal_request_code_scanning
+  - dismissal_request_dependabot
+  - dismissal_request_secret_scanning
+
+default_permissions:
+  contents: write
+  issues: read
+  members: read
+  metadata: read
+  organization_code_scanning_dismissal_requests: write
+  organization_dependabot_dismissal_requests: write
+  secret_scanning_alerts: write
+  secret_scanning_dismissal_requests: write
+  security_events: write
+  vulnerability_alerts: write
+
+# These are GitHub's current documented permission slugs. Existing GitHub App
+# registrations still need to be updated and approved in the App settings UI.

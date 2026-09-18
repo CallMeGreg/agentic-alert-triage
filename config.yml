@@ -1,117 +1,62 @@
-# =============================================================================
-# Alert Dismissal Automation — Configuration
-# =============================================================================
-# Edit this file to customize the automation behavior.
-# After changing this file, commit and push — no workflow edits are needed.
+# Alert dismissal triage configuration
 
-# ---------------------------------------------------------------------------
-# CRITERIA: What makes a valid dismissal comment?
-# ---------------------------------------------------------------------------
-# Each criterion below is optional.  If a value is omitted (or commented out),
-# that check is not enforced.  If none are configured, all comments are
-# accepted and left for human review.
+# Trusted organization whose signed dismissal-request webhooks are accepted.
+# Set this explicitly when the control repository has a different owner.
+organization: callmegreg-demo-org
 
-# The phrase that MUST appear in every dismissal comment (case-insensitive by
-# default; set case_sensitive: true to require exact casing).
-# required_phrase: "mitigating control"
-
-# A regular expression pattern the comment must match.  Uses JavaScript RegExp
-# syntax.  Honors the case_sensitive setting.  In YAML, use double backslashes
-# for literal backslash characters (e.g. "JIRA-\\d+" becomes the regex JIRA-\d+).
-required_pattern: "https://github\\.com/callmegreg-demo-org/[a-zA-Z0-9._-]+/issues/\\d+"
-
-# The minimum number of characters (after trimming whitespace) required in the
-# dismissal comment.
-# minimum_length: 20
-
-# Whether the required_phrase and required_pattern checks are case-sensitive.
-case_sensitive: false
-
-# ---------------------------------------------------------------------------
-# REVIEW MODE: Deterministic checks, agentic review, or both
-# ---------------------------------------------------------------------------
-# deterministic — current behavior: deny comments that fail the criteria above.
-# agentic       — send every open request to the agentic workflow.
-# both          — deny obvious criteria failures first, then send requests that
-#                 pass the deterministic checks to the agentic workflow.
-#
-# Agentic processing is opt-in. Keep "deterministic" until the generated
-# agentic workflow has been tested and the GitHub App permissions are updated.
+# deterministic: deny comments that fail the configured criteria.
+# agentic: dispatch every created request to the gh-aw workflow.
+# both: deny deterministic failures and dispatch passing requests.
 review_mode: deterministic
 
-# Agentic workflow settings. These values are used by both the polling workflow
-# that emits repository_dispatch events and the agentic workflow that handles
-# them.
-agentic:
-  # Repository containing .github/workflows/agentic-dismissal-review.lock.yml.
-  # It must belong to the monitored organization. Defaults to
-  # GITHUB_REPOSITORY when omitted.
-  # workflow_repository: my-org/alert-dismissal-automation
+# Optional deterministic criteria. If all are omitted, every comment passes.
+# required_phrase: "mitigating control"
+required_pattern: "https://github\\.com/callmegreg-demo-org/[a-zA-Z0-9._-]+/issues/\\d+"
+# minimum_length: 20
+case_sensitive: false
 
-  # Team whose members receive alerts that the agent determines are ready for
-  # human review. The team is expected to hold the organization security
-  # manager role, so the automation does not perform per-repository
-  # collaborator permission checks. Code scanning and Dependabot support
-  # multiple assignees. Secret scanning currently supports one assignee,
-  # selected deterministically from the team.
-  appsec_team_slug: appsec-team
-
-  # Keep staged mode enabled while piloting. The agent runs and SafeOutput
-  # previews appear in the Actions summary, but no request is denied and no
-  # alert is assigned. Set to false after reviewing trial runs.
-  staged: true
-
-  # Contact included in agentic denial messages. Defaults to
-  # "@<organization>/<appsec_team_slug>" when omitted.
-  # help_contact: "@my-org/appsec-team"
-
-  # Optional custom template for agentic denials. Available placeholders:
-  #   {requester}, {denial_reason}, {help_contact}, {alert_type},
-  #   {alert_number}, {repo_full_name}
-  # denial_message: |
-  #   Your dismissal request was denied: {denial_reason}
-  #   Please add concrete evidence and contact {help_contact} for help.
-
-# ---------------------------------------------------------------------------
-# ALERT TYPES: Which alert categories should be monitored?
-# ---------------------------------------------------------------------------
-# Supported values: code_scanning | secret_scanning | dependabot
+# All three official dismissal-request webhook categories are enabled by
+# default. Remove a value to ignore that subscribed event safely.
 alert_types:
   - code_scanning
+  - dependabot
   - secret_scanning
-  # - dependabot
 
-# ---------------------------------------------------------------------------
-# SCOPE: Which organization should be monitored?
-# ---------------------------------------------------------------------------
-# The automation queries org-level dismissal request endpoints and processes
-# all pending requests across every repository in the organization.
-#
-# Delegated alert dismissal must be enabled in the organization for these
-# endpoints to be available.
-#
-# If not set, the owner component of GITHUB_REPOSITORY is used (i.e. the org
-# that owns the repository running this workflow).
-#
-# organization: my-org
+agentic:
+  # Central repository containing the compiled agentic workflow. The GitHub
+  # App must also be installed on this repository (or its owner) with
+  # Contents: write so it can create repository_dispatch events.
+  workflow_repository: CallMeGreg/agentic-alert-triage
 
-# ---------------------------------------------------------------------------
-# DENIAL MESSAGE TEMPLATE
-# ---------------------------------------------------------------------------
-# Customize the message sent via the dismissal request review API when a
-# request is denied.  The message appears directly in the dismissal request
-# review so the requester can see why their request was denied.
-# Available placeholders:
-#   {alert_type}      — e.g. "code scanning"
-#   {alert_number}    — numeric alert ID
-#   {required_phrase} — value of required_phrase above
-#   {denial_reason}   — human-readable reason for the denial
-#   {requester}       — GitHub username of the person who submitted the request
-#   {repo_full_name}  — "owner/repo" of the monitored repository
-#
-# The default template is used when this key is absent or empty.
+  # This team is assumed to hold GitHub's organization Security Manager role.
+  appsec_team_slug: appsec-team
+
+  # Preview SafeOutput decisions until the workflow has been evaluated.
+  staged: true
+
+  # Defaults to "@<organization>/<appsec_team_slug>" when omitted.
+  # help_contact: "@callmegreg-demo-org/appsec-team"
+
+  # Optional denial template. Available placeholders:
+  # {requester}, {denial_reason}, {help_contact}, {alert_type},
+  # {alert_number}, {repo_full_name}
+  # denial_message: |
+  #   Your dismissal request was denied: {denial_reason}
+  #   Contact {help_contact} for help.
+
+# Short-lived, bounded process-local caches reduce duplicate webhook work and
+# GitHub API calls. They are not a durable queue or cross-replica lock.
+cache:
+  team_members_ttl_seconds: 300
+  control_installation_ttl_seconds: 600
+  delivery_dedupe_ttl_seconds: 900
+  delivery_dedupe_max_entries: 1000
+
+# Deterministic denial placeholders:
+# {alert_type}, {alert_number}, {required_phrase}, {denial_reason},
+# {requester}, {repo_full_name}
 denial_message: |
-  ⚠️ Alert Dismissal Request Denied
+  Alert Dismissal Request Denied
   Your request to dismiss this alert has been automatically denied.
-  **Reason:** {denial_reason}
+  Reason: {denial_reason}
   Please create an issue using the following template and add the link to the dismissal request message: https://github.com/callmegreg-demo-org/app-xyz-repo/issues/new?template=foo.yml

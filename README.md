@@ -1,399 +1,391 @@
-# Alert Dismissal Automation
+# Agentic Alert Triage
 
-A GitHub Actions automation for reviewing delegated GitHub security alert
-dismissal requests. It supports three review modes:
+A persistent [Probot](https://probot.github.io/) GitHub App that reviews
+delegated security alert dismissal requests as soon as GitHub delivers the
+signed webhook. It supports deterministic policy checks, bounded agentic
+review, or both.
 
 | Mode | Behavior |
 |---|---|
-| `deterministic` | Deny requests that fail configured phrase, pattern, or length checks. |
-| `agentic` | Dispatch every open request to a GitHub Agentic Workflow for contextual review. |
-| `both` | Run deterministic checks first, then dispatch requests that pass them. |
+| `deterministic` | Immediately deny requests whose comments fail configured phrase, pattern, or length checks. Passing requests remain open. |
+| `agentic` | Send every created request to the central gh-aw workflow for contextual review. |
+| `both` | Deny deterministic failures immediately and dispatch passing requests for agentic review. |
 
-The default remains `deterministic`. Agentic review is opt-in and starts in
-staged mode so its decisions can be evaluated without changing alert state.
+The agent never approves a dismissal request. A request judged ready remains
+open and the alert is assigned to the configured AppSec team for final human
+review.
 
 > [!NOTE]
-> This automation uses GitHub's
-> [delegated alert dismissal](https://docs.github.com/en/code-security/concepts/security-at-scale/delegated-alert-dismissal)
-> APIs. Delegated alert dismissal must be enabled for the organization.
+> Delegated alert dismissal must be enabled in the monitored organization.
+> Delegated alert dismissal for secret scanning is currently
+> [public preview](https://docs.github.com/en/code-security/how-tos/manage-security-alerts/remediate-alerts-at-scale/review-alert-dismissal-requests)
+> and is subject to change.
 
-> [!WARNING]
-> Dependabot dismissal request processing is not currently functional in this
-> deployment. Track the limitation in #9.
+## Webhook ingress
 
-## How it works
+The App subscribes to the official GitHub webhook categories below and handles
+only the `created` action:
 
-The existing scheduled workflow remains the discovery mechanism:
+| Webhook event | Probot event | Required `exemption_request_data.type` |
+|---|---|---|
+| `dismissal_request_code_scanning` | `dismissal_request_code_scanning.created` | `code_scanning_alert_dismissal` |
+| `dismissal_request_dependabot` | `dismissal_request_dependabot.created` | `dependabot_alert_dismissal` |
+| `dismissal_request_secret_scanning` | `dismissal_request_secret_scanning.created` | `secret_scanning_closure` |
 
-1. Mint a short-lived GitHub App installation token.
-2. List open dismissal requests across the configured organization.
-3. Apply the configured `review_mode`.
-4. For agentic processing, send an `alert-dismissal-requested`
-   `repository_dispatch` event to the automation repository.
+See GitHub's
+[webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads)
+reference. All three alert types are enabled in [`config.yml`](config.yml) by
+default. Removing a type from `alert_types` makes the subscribed event a safe
+no-op.
 
-The dispatch payload contains a sanitized snapshot of the open dismissal
-request and the current AppSec team membership. It does not contain alert
-content or secret values.
+For each signed delivery, the handler:
 
-The compiled agentic workflow then:
+1. Validates the event/action, organization, repository and installation IDs,
+   dismissal request IDs, repository ID, requester, request data type, and up
+   to 100 positive unique alert numbers.
+2. Ignores opaque `metadata`, `responses`, and unknown request-data fields.
+3. Applies deterministic checks with the incoming installation Octokit when
+   configured.
+4. Resolves and caches the configured AppSec team's sanitized member logins
+   with the incoming installation Octokit.
+5. Resolves the GitHub App installation for the central control repository
+   using App authentication, obtains that installation Octokit, and creates one
+   `repository_dispatch` per unique alert number.
 
-1. Validates the dispatch payload against `config.yml`.
-2. Resolves the monitored organization from trusted `config.yml`, then mints a
-   fresh GitHub App installation token in a deterministic pre-agent step.
-3. Uses the dispatched request snapshot and fetches the current alert that
-   triggered the event.
-4. Hides secret values and fetches a bounded set of same-organization GitHub
-   issues linked from the request comment.
-5. Skips inference when the dispatched request was not open or the alert is
-   already assigned to AppSec.
-6. Gives the agent only the sanitized local context and one bounded SafeOutput.
-7. Runs gh-aw threat detection before applying the requested action.
-8. Applies an optimistic denial directly or fetches the current alert only
-   when needed to preserve existing assignees.
+The dismissal request is never re-fetched. The trusted snapshot comes directly
+from GitHub's signature-verified webhook payload.
 
-The agent can make only one of two decisions:
+## Agentic review flow
 
-- **Ready for human review:** leave the dismissal request open and assign the
-  alert to members of the configured AppSec team.
-- **Deny:** deny the dismissal request with a concise reason, guidance about
-  what supporting detail is needed, and an AppSec contact.
+The repository dispatch uses schema version 1 and is capped at 60,000
+characters. It contains only:
 
-The agent never approves a dismissal request.
+- validated target organization, repository, repository ID, alert type, alert
+  number, and dismissal request identifiers;
+- a bounded request snapshot with requester login, comment, request status,
+  request data type, selected dismissal reasons, dates, and URL;
+- a sanitized, sorted AppSec membership snapshot;
+- bounded provenance: control repository, webhook event, incoming installation
+  ID, and delivery ID when available.
 
-### Alert assignment behavior
+Token-shaped values and private keys are redacted from requester text. Alert
+content, secret values, opaque webhook fields, and agent instructions are not
+included.
 
-The default team slug is `appsec-team` and is configurable.
+The compiled workflow
+[`agentic-dismissal-review.lock.yml`](.github/workflows/agentic-dismissal-review.lock.yml)
+is generated from
+[`agentic-dismissal-review.md`](.github/workflows/agentic-dismissal-review.md).
+It:
 
-- Code scanning and Dependabot alerts are assigned to all snapshotted AppSec
-  team members. Existing assignees are preserved.
-- The secret scanning REST API currently supports one assignee. The automation
-  selects one team member deterministically from the configured team.
-- The automation intentionally does not make per-user collaborator permission
-  requests before assignment.
+1. Validates the App-authenticated dispatch sender, target, schema, request
+   snapshot, source event, installation metadata, alert type, and team snapshot
+   against trusted `config.yml`.
+2. Mints a fresh installation token for the monitored organization using the
+   same GitHub App.
+3. Fetches only the current alert and up to five same-organization linked
+   issues with at most 20 comments each. It does not fetch current request
+   state.
+4. Requests secret scanning alerts with `hide_secret=true` and removes
+   sensitive patterns before writing local agent context.
+5. Skips inference when the webhook snapshot was not open/pending or the alert
+   is already assigned to AppSec.
+6. Gives the model read-only local context, bounded shell access, no GitHub MCP,
+   no edit/commit/PR output, and one custom SafeOutput:
+   `apply_dismissal_decision`.
+7. Runs gh-aw threat detection before a fresh-checkout SafeOutput job applies
+   the decision with a new App installation token.
 
-### AppSec access assumption
+Concurrency is grouped per repository, alert type, and alert number with
+`cancel-in-progress: true`. Denials are optimistic writes: known stale responses
+from already completed, cancelled, expired, approved, or denied requests are
+safe no-ops. Assignment endpoint failures are not hidden.
 
-The configured AppSec team is assumed to have GitHub's **security manager**
-organization role. That role gives the team read access to every repository and
-write access to security alerts across the organization. Team membership is
-resolved once by the poller and included in the App-authenticated dispatch
-snapshot, avoiding team and collaborator lookups in each agentic workflow run.
-See
-[Managing security managers in your organization](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-peoples-access-to-your-organization-with-roles/managing-security-managers-in-your-organization).
+### Assignment behavior
 
-## Agentic workflow safety controls
+- Code scanning and Dependabot alerts preserve existing assignees and add all
+  snapshotted AppSec members.
+- Secret scanning currently supports one alert assignee, selected
+  deterministically from the team snapshot.
+- No per-user collaborator probes are made.
 
-The source workflow is
-[`.github/workflows/agentic-dismissal-review.md`](.github/workflows/agentic-dismissal-review.md).
-`gh aw compile` generates
-[`agentic-dismissal-review.lock.yml`](.github/workflows/agentic-dismissal-review.lock.yml),
-which is the workflow GitHub Actions executes.
+The configured team is assumed to hold GitHub's organization
+[Security Manager role](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-peoples-access-to-your-organization-with-roles/managing-security-managers-in-your-organization),
+which provides repository read access and permission to manage security alerts.
 
-The workflow follows the
-[GitHub Agentic Workflows best practices](https://github.github.com/gh-aw/introduction/how-they-work/#best-practices):
+## GitHub App installation and authentication
 
-- Strict-mode compilation and SHA-pinned actions in the generated lockfile.
-- Read-only built-in `GITHUB_TOKEN` permissions during agent execution.
-- GitHub App secrets and installation tokens are scoped to deterministic steps
-  and the separate SafeOutput job, not the model.
-- GitHub MCP access is disabled, and the source workflow disables edit tools.
-  gh-aw v0.82.3 still injects an internal ephemeral workspace write capability
-  into the Copilot runtime; there is no commit, pull request, or patch
-  SafeOutput, and the state-changing job runs from a fresh checkout.
-- Network access is denied except for framework-required services.
-- The only external write is a custom `apply_dismissal_decision` SafeOutput.
-- Threat detection gates the SafeOutput.
-- Dispatch payloads and SafeOutput targets are validated against trusted
-  configuration rather than agent-provided owner, repository, or alert IDs.
-- Request comments in the dispatch snapshot are redacted, bounded, and treated
-  as untrusted evidence.
-- Secret scanning values are removed before context is written.
-- Requester text and linked issue content are explicitly treated as untrusted
-  evidence.
-- Concurrency, turn, timeout, and per-run AI credit limits are configured. The
-  daily AI credit limit is explicitly disabled.
-- Staged mode is enabled in `config.yml` by default.
+Use one GitHub App registration, but install it in both security and control
+planes:
 
-Do not edit the generated `.lock.yml` directly. Edit the Markdown source and
-recompile it.
+1. **Monitored organization/repositories:** receives dismissal-request
+   webhooks, performs deterministic denials, reads AppSec membership, and
+   allows the agentic workflow to read and assign alerts.
+2. **Control repository owner/repository:** includes the repository configured
+   by `agentic.workflow_repository` (default
+   `CallMeGreg/agentic-alert-triage`) and permits `repository_dispatch`.
 
-## Prerequisites
+The incoming webhook installation token is never assumed to reach the control
+repository. For dispatch, the service authenticates as the App, calls
+[`GET /repos/{owner}/{repo}/installation`](https://docs.github.com/en/rest/apps/installations#get-a-repository-installation-for-the-authenticated-app),
+caches the installation ID briefly, obtains that installation's Octokit
+through Probot, and calls
+[`POST /repos/{owner}/{repo}/dispatches`](https://docs.github.com/en/rest/repos/repos#create-a-repository-dispatch-event).
 
-| Requirement | Notes |
-|---|---|
-| GitHub Advanced Security products | Required for the alert types being monitored. |
-| Delegated alert dismissal | Must be enabled in the organization. |
-| GitHub App | Used for discovery, dispatch, request review, team lookup, and alert assignment. |
-| AppSec security manager team | The configured team must have the organization security manager role. |
-| Copilot inference access | The agentic workflow uses `copilot-requests: write` on its built-in Actions token. |
-| Node.js 20 or newer | Local development; workflows currently use Node.js 24. |
-| `gh-aw` CLI | Required only when editing or recompiling the agentic workflow. |
+The control-repository installation requires **Contents: write**. The same App
+permission set applies across installations, so use selected-repository
+installations where tighter repository scope is required.
 
 ## GitHub App permissions
 
-Use a dedicated App and grant only the permissions required by the enabled
-review modes.
+[`app.yml`](app.yml) is a Probot/GitHub App manifest for initial registration.
+It includes the standard parameterized permissions and exact webhook event
+subscriptions. Changing it does not update an existing App.
+
+Verify these permissions in the GitHub App settings UI:
 
 ### Organization permissions
 
-| Permission | Access | Used for |
+| Permission shown in GitHub | Access | Purpose |
 |---|---|---|
-| Organization dismissal requests for code scanning | Read & write | List and deny code scanning dismissal requests |
-| Organization dismissal requests for Dependabot | Read & write | List and deny Dependabot dismissal requests |
-| Secret scanning alert dismissal requests | Read & write | List and deny secret scanning dismissal requests |
-| Members | Read-only for agentic mode | Resolve the configured AppSec team and its members |
+| Organization dismissal requests for code scanning | Read & write | Receive/review code scanning dismissal requests |
+| Organization dismissal requests for Dependabot | Read & write | Receive/review Dependabot dismissal requests |
+| Secret scanning alert dismissal requests | Read & write | Receive/review secret scanning dismissal requests |
+| Members | Read-only | Resolve the configured AppSec team |
+
+The manifest uses GitHub's current documented permission slugs. Existing App
+registrations must still be updated and approved in the App UI; verify these
+permissions by their display names rather than guessing new slugs.
 
 ### Repository permissions
 
-| Permission | Deterministic only | Agentic enabled | Used for |
-|---|---:|---:|---|
-| Code scanning alerts | Read-only | Read & write | Read alert context and assign code scanning alerts |
-| Dependabot alerts | Read-only | Read & write | Read alert context and assign Dependabot alerts |
-| Secret scanning alerts | Read-only | Read & write | Read sanitized alert context and assign secret scanning alerts |
-| Contents | Not required | Read & write | Emit `repository_dispatch` |
-| Metadata | Read-only | Read-only | Required by all GitHub Apps |
-| Issues | Not required | Read-only when linked evidence is private | Read same-organization issues linked from dismissal comments |
+| Permission shown in GitHub | Access | Purpose |
+|---|---|---|
+| Code scanning alerts | Read & write | Subscribe, read current alerts, and assign ready alerts |
+| Dependabot alerts | Read & write | Subscribe, read current alerts, and assign ready alerts |
+| Secret scanning alerts | Read & write | Subscribe, read hidden-secret alert context, and assign ready alerts |
+| Contents | Write | Create `repository_dispatch` on the control repository |
+| Issues | Read-only | Read bounded linked evidence, including private issues when installed |
+| Metadata | Read-only | Required GitHub App repository metadata |
 
-`repository_dispatch` requires `Contents: write`, and the configured workflow
-repository must be in the monitored organization so one installation token can
-perform discovery and dispatch. GitHub App repository
-permissions apply to every repository in that installation, so review this
-permission carefully. For tighter isolation, use a dedicated automation App or
-host the dispatch receiver in a narrowly scoped automation repository.
+GitHub documents the permission required by each endpoint in
+[Permissions required for GitHub Apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps).
 
-The automation assumes the AppSec team has the security manager role and does
-not probe individual repository collaborator permissions before assignment.
-GitHub's alert assignment endpoint remains authoritative and any rejected
-assignment is surfaced as a workflow failure.
+## Configure the service
 
-## Setup
-
-### 1. Create and install the GitHub App
-
-Create a GitHub App with the permissions above and install it in the
-organization being monitored. Webhooks are not required because request
-discovery remains poll-based.
-
-### 2. Add Actions secrets
-
-Add these repository or organization Actions secrets to the automation
-repository:
-
-| Secret | Value |
-|---|---|
-| `ALERT_DISMISSAL_APP_CLIENT_ID` | GitHub App client ID |
-| `ALERT_DISMISSAL_APP_PRIVATE_KEY` | Full GitHub App private key PEM |
-
-The agentic workflow uses the built-in `GITHUB_TOKEN` and
-`copilot-requests: write` for model inference. It does not use the App token for
-inference.
-
-### 3. Configure review behavior
-
-Edit [`config.yml`](config.yml):
+[`config.yml`](config.yml) is loaded once when the Probot process starts:
 
 ```yaml
-# deterministic | agentic | both
+organization: callmegreg-demo-org
 review_mode: both
 
-agentic:
-  appsec_team_slug: appsec-team
-  staged: true
-  # workflow_repository: my-org/alert-dismissal-automation
-  # help_contact: "@my-org/appsec-team"
-
-required_pattern: "https://github\\.com/my-org/[a-zA-Z0-9._-]+/issues/\\d+"
+required_pattern: "https://github\\.com/callmegreg-demo-org/[a-zA-Z0-9._-]+/issues/\\d+"
 minimum_length: 20
+case_sensitive: false
 
 alert_types:
   - code_scanning
+  - dependabot
   - secret_scanning
+
+agentic:
+  workflow_repository: CallMeGreg/agentic-alert-triage
+  appsec_team_slug: appsec-team
+  staged: true
+
+cache:
+  team_members_ttl_seconds: 300
+  control_installation_ttl_seconds: 600
+  delivery_dedupe_ttl_seconds: 900
+  delivery_dedupe_max_entries: 1000
 ```
 
-Recommended rollout:
+### Configuration reference
 
-1. Keep `review_mode: deterministic` while installing the workflow and updating
-   App permissions.
-2. Set `review_mode: agentic` or `both`, leaving `agentic.staged: true`.
-3. Review several workflow summaries and gh-aw audit logs.
-4. Set `agentic.staged: false` only after the decisions and messages meet your
-   policy.
+| Key | Default | Description |
+|---|---|---|
+| `organization` | webhook organization in deterministic mode; required trusted value for agentic use | Only this organization's events and workflow targets are accepted |
+| `review_mode` | `deterministic` | `deterministic`, `agentic`, or `both` |
+| `required_phrase` | none | Phrase required in the requester comment |
+| `required_pattern` | none | JavaScript regular expression required in the requester comment |
+| `minimum_length` | none | Minimum trimmed requester-comment length |
+| `case_sensitive` | `false` | Case-sensitive phrase and regex matching |
+| `alert_types` | all three | Enabled alert categories; subscribed disabled types are ignored |
+| `agentic.workflow_repository` | `CallMeGreg/agentic-alert-triage` | Central repository receiving schema-v1 dispatches |
+| `agentic.appsec_team_slug` | `appsec-team` | Security Manager team used for ready-alert assignment |
+| `agentic.staged` | `true` | Preview SafeOutput writes |
+| `agentic.help_contact` | `@org/team` | Contact included in agentic denials |
+| `agentic.denial_message` | built-in | Optional agentic denial template |
+| `denial_message` | built-in | Optional deterministic denial template |
+| `cache.team_members_ttl_seconds` | `300` | Process-local team cache TTL, 1-3600 seconds |
+| `cache.control_installation_ttl_seconds` | `600` | Process-local control installation cache TTL, 1-3600 seconds |
+| `cache.delivery_dedupe_ttl_seconds` | `900` | Successful delivery-operation dedupe TTL, 1-3600 seconds |
+| `cache.delivery_dedupe_max_entries` | `1000` | Bounded delivery-operation cache size, 1-10000 |
 
-### 4. Enable polling
+Agentic denial placeholders are `{requester}`, `{denial_reason}`,
+`{help_contact}`, `{alert_type}`, `{alert_number}`, and `{repo_full_name}`.
+Deterministic denial placeholders are `{alert_type}`, `{alert_number}`,
+`{required_phrase}`, `{denial_reason}`, `{requester}`, and `{repo_full_name}`.
 
-The schedule in
-[`.github/workflows/alert-dismissal-check.yml`](.github/workflows/alert-dismissal-check.yml)
-is currently commented out. Enable and adjust it as needed:
+Restart the service after configuration changes.
 
-```yaml
-on:
-  schedule:
-    - cron: "*/15 * * * *"
-  workflow_dispatch:
+## Deploy Probot
+
+The application requires Node.js 22 or newer and pins Probot exactly to
+`14.3.2`. GitHub Actions workflows may continue using Node.js 24.
+
+### Environment
+
+Copy [`.env.example`](.env.example) to `.env` for local development, or set
+these values in the deployment platform:
+
+| Variable | Required | Description |
+|---|---:|---|
+| `APP_ID` | yes | GitHub App ID |
+| `PRIVATE_KEY` or `PRIVATE_KEY_PATH` | yes | GitHub App private key contents or file path |
+| `WEBHOOK_SECRET` | yes | Strong secret matching the GitHub App webhook configuration |
+| `PORT` | no | HTTP port, default `3000` |
+| `WEBHOOK_PROXY_URL` | local only | Smee or equivalent forwarding URL |
+| `CONFIG_PATH` | no | Configuration file path, default `./config.yml` |
+| `LOG_LEVEL` | no | Probot log level |
+
+Set the GitHub App webhook URL to the public Probot endpoint:
+
+```text
+https://your-service.example/api/github/webhooks
 ```
 
-### 5. Install gh-aw for workflow development
+Probot validates `X-Hub-Signature-256` using `WEBHOOK_SECRET`. Do not deploy
+without a webhook secret.
+
+Install dependencies and start the persistent HTTP service:
 
 ```bash
-gh extension install github/gh-aw
+npm install
+npm start
 ```
 
-Compile after editing the Markdown workflow:
+See Probot's
+[configuration](https://probot.github.io/docs/configuration/) and
+[deployment](https://probot.github.io/docs/deployment/) guides.
+
+### Local webhook development
+
+```bash
+cp .env.example .env
+# Fill APP_ID, PRIVATE_KEY_PATH, WEBHOOK_SECRET, and WEBHOOK_PROXY_URL.
+npm install
+npm run dev
+```
+
+Create a temporary forwarding URL at [smee.io](https://smee.io/new), use it as
+the App webhook URL and `WEBHOOK_PROXY_URL`, and keep its secret identical to
+`WEBHOOK_SECRET`.
+
+### Container
+
+The platform-neutral [`Dockerfile`](Dockerfile) uses Node.js 22:
+
+```bash
+docker build -t agentic-alert-triage .
+docker run --rm -p 3000:3000 --env-file .env agentic-alert-triage
+```
+
+Mount a private key file into the container when using `PRIVATE_KEY_PATH`, or
+provide `PRIVATE_KEY` through the deployment secret store.
+
+## Configure the agentic workflow
+
+The control repository needs these Actions secrets:
+
+| Secret | Description |
+|---|---|
+| `ALERT_DISMISSAL_APP_CLIENT_ID` | Client ID for the same GitHub App used by Probot |
+| `ALERT_DISMISSAL_APP_PRIVATE_KEY` | Full private key PEM for that App |
+
+The App must be installed on the configured monitored organization so
+`actions/create-github-app-token` can mint the alert/evidence and decision
+tokens. The model never receives the App private key or installation token.
+Copilot inference uses `copilot-requests: write` on the workflow's built-in
+Actions token.
+
+Keep `agentic.staged: true` while evaluating decisions. Set it to `false` only
+after reviewing workflow summaries and gh-aw audit logs.
+
+Do not edit the generated `.lock.yml` directly. Edit the Markdown source, then:
 
 ```bash
 npm run compile:agentic
 ```
 
-Commit both the `.md` source and generated `.lock.yml`.
+Commit both workflow files.
 
-## Manual testing
+## Delivery, retry, and scaling semantics
 
-### Poller dry run
+GitHub webhook delivery is at-least-once.
 
-Trigger **Alert Dismissal Review** from the Actions tab with `dry_run: true`, or
-run locally:
+- A bounded process-local cache deduplicates each delivery/alert operation
+  during its TTL. Failed operations are removed so a GitHub retry can run.
+- Team membership and control-installation resolution are cached for short
+  configurable TTLs, avoiding one Members API call and one App installation
+  lookup per event.
+- Caches do not survive restarts and are not shared by replicas. They are an
+  efficiency layer, not the durable correctness mechanism.
+- Across restarts or replicas, duplicate agentic dispatches converge through
+  per-alert gh-aw concurrency with cancellation. Duplicate deterministic or
+  agentic denials converge through optimistic writes and stale-response
+  handling.
+- A multi-alert request creates one dispatch per unique validated alert number.
+  If one operation fails, successful cache entries remain and the failed entry
+  is retryable.
 
-```bash
-export GITHUB_TOKEN=<github-app-installation-token>
-export GITHUB_REPOSITORY=my-org/alert-dismissal-automation
+For multi-replica rate-limit coordination, Probot supports `REDIS_URL` for
+Octokit throttling. The delivery dedupe cache in this project remains local;
+use an external queue/idempotency store before relying on exactly-once
+processing across replicas.
 
-DRY_RUN=true node scripts/check-dismissals.js
-```
-
-Dry-run mode logs deterministic denials and agentic dispatches without making
-changes or emitting a dispatch event.
-
-### Direct repository dispatch
-
-The dispatcher normally builds this payload from an open request. With
-`review_mode` set to `agentic` or `both`, use an installation token from the
-configured GitHub App for targeted testing. Dispatches from other identities
-are rejected:
-
-```bash
-export GH_TOKEN=<github-app-installation-token>
-
-gh api repos/my-org/alert-dismissal-automation/dispatches \
-  --method POST \
-  --input - <<'JSON'
-{
-  "event_type": "alert-dismissal-requested",
-  "client_payload": {
-    "schema_version": 1,
-    "target": {
-      "organization": "my-org",
-      "repository": "my-org/service-repo",
-      "alert_type": "code_scanning",
-      "alert_number": 42,
-      "dismissal_request_id": 1234,
-      "dismissal_request_number": 7
-    },
-    "request": {
-      "id": 1234,
-      "number": 7,
-      "status": "open",
-      "request_type": "dismiss",
-      "requester": { "actor_name": "octocat" },
-      "requester_comment": "Test-only finding; evidence is linked here.",
-      "dismissal_reasons": ["tests"],
-      "created_at": "2026-09-18T15:00:00Z"
-    },
-    "review": {
-      "appsec_team_members": ["security-reviewer-1", "security-reviewer-2"]
-    },
-    "source": {
-      "repository": "my-org/alert-dismissal-automation",
-      "run_id": "123456"
-    },
-    "dry_run": true
-  }
-}
-JSON
-```
-
-The request snapshot IDs must match the target IDs. Production dispatches are
-built directly from the org-level open-request listing response.
+Logs contain event names, delivery/request identifiers, repositories, alert
+counts, and outcomes. Requester comments and secret-bearing webhook content are
+not logged.
 
 ## Development
 
 ```bash
-npm ci
+npm install
+npm run check
 npm test
 npm run compile:agentic
 ```
 
-The test suite covers deterministic validation, sanitized dispatch snapshots,
-event validation, secret redaction, evidence URL filtering, assignment
-selection, mention neutralization, optimistic stale-request handling, and
-denial formatting.
-
-## Configuration reference
-
-### Deterministic checks
-
-| Key | Default | Description |
-|---|---|---|
-| `required_phrase` | none | Phrase that must appear in the requester comment |
-| `required_pattern` | none | JavaScript regular expression the comment must match |
-| `minimum_length` | none | Minimum trimmed comment length |
-| `case_sensitive` | `false` | Apply phrase and regex checks case-sensitively |
-
-### Review and agentic settings
-
-| Key | Default | Description |
-|---|---|---|
-| `review_mode` | `deterministic` | `deterministic`, `agentic`, or `both` |
-| `agentic.workflow_repository` | `GITHUB_REPOSITORY` | Same-organization repository receiving `repository_dispatch` |
-| `agentic.appsec_team_slug` | `appsec-team` | Team used for ready-for-review assignment |
-| `agentic.staged` | `true` | Preview SafeOutput actions without applying them |
-| `agentic.help_contact` | `@org/team` | Contact included in denial messages |
-| `agentic.denial_message` | built-in template | Optional denial message template |
-
-Agentic denial placeholders are `{requester}`, `{denial_reason}`,
-`{help_contact}`, `{alert_type}`, `{alert_number}`, and `{repo_full_name}`.
-
-### Scope
-
-| Key | Default | Description |
-|---|---|---|
-| `alert_types` | all three types | Enabled alert categories |
-| `organization` | owner of `GITHUB_REPOSITORY` | Organization whose requests are monitored |
+The test suite covers exact event registration and routing, action/type
+validation, multi-alert deduplication, disabled alert types, request
+snapshotting and redaction, team and control-installation caches, separate
+control dispatch authentication, deterministic/agentic/both behavior,
+duplicate deliveries, retries, stale writes, secret hiding, assignment, and
+failure propagation.
 
 ## Repository structure
 
 ```text
 .
 ├── .github/
-│   ├── aw/
-│   │   └── actions-lock.json
+│   ├── aw/actions-lock.json
 │   └── workflows/
-│       ├── alert-dismissal-check.yml
 │       ├── agentic-dismissal-review.md
 │       ├── agentic-dismissal-review.lock.yml
 │       └── aw.json
 ├── scripts/
 │   ├── agentic-review.js
 │   ├── apply-agentic-decision.js
-│   ├── check-dismissals.js
-│   ├── export-workflow-config.js
+│   ├── deterministic-review.js
 │   ├── prepare-agentic-review.js
+│   ├── webhook-review.js
 │   └── *.test.js
+├── .env.example
+├── app.yml
 ├── config.yml
-├── .gitattributes
+├── Dockerfile
+├── index.js
 ├── package.json
 └── package-lock.json
 ```
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| No agentic workflow run appears | `review_mode` is deterministic, dry run is enabled, or the dispatch token lacks `Contents: write` | Check configuration and App permissions |
-| Agent job exits before inference | The dispatched snapshot was not open or the alert is already assigned to AppSec | Review the workflow summary; this is an idempotency safeguard |
-| Team lookup fails | App lacks `Members: read`, the slug is wrong, or the team is not visible to the App | Update App permissions and `appsec_team_slug` |
-| Ready decision fails to assign | The AppSec team lacks the security manager role or GitHub rejected an assignee | Verify the team role and alert assignment eligibility |
-| Optimistic denial becomes a no-op | A human completed or removed the request while the agent was running | No action is required; the workflow summary records the stale result |
-| Workflow only previews changes | `agentic.staged` is still `true` or dispatch payload has `dry_run: true` | Disable staged mode only after validation |
-| Copilot inference fails | Organization does not permit `copilot-requests: write` | Confirm Copilot entitlement and Actions policy |
-| Lockfile is stale | Markdown source changed without recompilation | Run `npm run compile:agentic` and commit the lockfile |
-| 403/404 from dismissal APIs | Delegated dismissal or required App permissions are missing | Verify organization and repository permissions |
