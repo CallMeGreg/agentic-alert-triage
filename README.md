@@ -1,8 +1,7 @@
 # Agentic Alert Triage
 
-A persistent [Probot](https://probot.github.io/) GitHub App that reviews
-delegated security alert dismissal requests as soon as GitHub delivers the
-signed webhook. It supports deterministic policy checks, bounded agentic
+A GitHub App built with [Probot](https://probot.github.io/) that reviews
+delegated security alert dismissal requests. It supports deterministic policy checks, bounded agentic
 review, or both.
 
 | Mode | Behavior |
