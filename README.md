@@ -15,12 +15,6 @@ The agent never approves a dismissal request. A request judged ready remains
 open and the alert is assigned to the configured AppSec team for final human
 review.
 
-> [!NOTE]
-> Delegated alert dismissal must be enabled in the monitored organization.
-> Delegated alert dismissal for secret scanning is currently
-> [public preview](https://docs.github.com/en/code-security/how-tos/manage-security-alerts/remediate-alerts-at-scale/review-alert-dismissal-requests)
-> and is subject to change.
-
 ## Webhook ingress
 
 The App subscribes to the official GitHub webhook categories below and handles
