@@ -9,11 +9,13 @@ permissions:
   contents: read
   copilot-requests: write
 
-engine: copilot
+engine:
+  id: copilot
+  model: ${{ github.event.client_payload.review.model }}
 strict: true
 network: {}
 timeout-minutes: 10
-max-turns: 8
+max-turns: 50
 max-ai-credits: 1000
 max-daily-ai-credits: -1
 

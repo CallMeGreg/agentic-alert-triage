@@ -130,6 +130,7 @@ alert_types:
 
 agentic:
   workflow_repository: your-security-org/alert-triage
+  model: auto
   appsec_team_slug: ent:appsec-team
   staged: true
 
@@ -149,13 +150,14 @@ from the validated webhook snapshot, never the control repository owner or
 | Key | Default | Description |
 |---|---|---|
 | `enterprise` | required | Enterprise URL slug that must own the App |
-| `review_mode` | `deterministic` | `deterministic`, `agentic`, or `both` |
+| `review_mode` | `both` | `deterministic`, `agentic`, or `both` |
 | `required_phrase` | none | Phrase required in the requester comment |
 | `required_pattern` | none | JavaScript regular expression required in the requester comment |
 | `minimum_length` | none | Minimum trimmed requester-comment length |
 | `case_sensitive` | `false` | Case-sensitive phrase and regex matching |
 | `alert_types` | all three | Enabled alert categories |
-| `agentic.workflow_repository` | `CallMeGreg/agentic-alert-triage` | Central repository receiving schema-v1 dispatches |
+| `agentic.workflow_repository` | Required | Central repository that runs the agentic workflows |
+| `agentic.model` | `auto` | Copilot model used by the agentic workflow |
 | `agentic.appsec_team_slug` | `ent:appsec-team` | Enterprise team with the Security Manager role; `ent:` is required |
 | `agentic.staged` | `true` | Preview SafeOutput writes |
 | `agentic.help_contact` | `@/ent:appsec-team` | Contact included in agentic denials |

@@ -7,7 +7,7 @@ enterprise: your-enterprise
 # deterministic: deny comments that fail the configured criteria.
 # agentic: dispatch every created request to the gh-aw workflow.
 # both: deny deterministic failures and dispatch passing requests.
-review_mode: deterministic
+review_mode: both
 
 # Optional deterministic criteria. If all are omitted, every comment passes.
 # required_phrase: "mitigating control"
@@ -24,11 +24,14 @@ alert_types:
   - secret_scanning
 
 agentic:
-  # Central repository containing the compiled agentic workflow. The GitHub
-  # App must also be installed on this repository (or its owner) with
-  # Contents: write so it can create repository_dispatch events.
+  # Central repository that runs the agentic workflows. The GitHub App must
+  # also be installed on this repository (or its owner) with Contents: write
+  # so it can create repository_dispatch events.
   # Replace this example with a repository in your enterprise.
   workflow_repository: your-security-org/alert-triage
+
+  # Copilot model used by the agentic workflow.
+  model: auto
 
   # One enterprise team, assumed to hold the enterprise Security Manager role.
   # Use the full enterprise team slug, including GitHub's ent: prefix.

@@ -125,7 +125,8 @@ The payload is capped at 60,000 characters and contains only:
 - validated target organization, repository, repository ID, alert type, alert
   number, and request IDs;
 - a bounded/redacted request snapshot;
-- sanitized enterprise AppSec logins and `review.appsec_team_slug`;
+- sanitized enterprise AppSec logins, `review.appsec_team_slug`, and the
+  validated agentic model;
 - source control repository, official webhook event, incoming installation ID,
   delivery ID when present, and required `source.enterprise`.
 
@@ -257,9 +258,10 @@ Important defaults:
 
 | Key | Default |
 |---|---|
-| `review_mode` | `deterministic` |
+| `review_mode` | `both` |
 | `alert_types` | all three alert categories |
-| `agentic.workflow_repository` | `CallMeGreg/agentic-alert-triage` |
+| `agentic.workflow_repository` | Required |
+| `agentic.model` | `auto` |
 | `agentic.appsec_team_slug` | `ent:appsec-team` |
 | `agentic.staged` | `true` |
 | `cache.app_identity_ttl_seconds` | `600` |
