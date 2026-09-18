@@ -65,9 +65,9 @@ The signed webhook `exemption_request` is the trusted request snapshot.
 `scripts/webhook-review.js`:
 
 1. Loads local `config.yml` once at process startup.
-2. Validates event/action consistency, configured organization, repository and
+2. Validates event/action consistency, webhook organization, repository and
    installation IDs, request and requester IDs, request repository ID, request
-   data type, and up to 100 bounded alert numbers. Enterprise mode accepts
+   data type, and up to 100 bounded alert numbers. Accepts
    organization installations only after App-authenticated `GET /app` verifies
    that the App is owned by the configured enterprise.
 3. Deduplicates alert numbers and handles each unique number once per bounded
@@ -75,14 +75,18 @@ The signed webhook `exemption_request` is the trusted request snapshot.
 4. Ignores opaque webhook fields such as `metadata`, `responses`, and unknown
    request-data fields.
 5. Never logs requester comments or secret-bearing payload content.
-6. Uses the incoming installation Octokit for deterministic denials and AppSec
-   team membership.
+6. Uses the incoming installation Octokit for deterministic denials. Resolves
+   the enterprise installation with App-authenticated
+   `GET /enterprises/{enterprise}/installation` and reads the enterprise team's
+   membership with that installation's Octokit via
+   `GET /enterprises/{enterprise}/teams/{enterprise-team}/memberships`.
 7. Uses App authentication to resolve the control repository installation via
    `GET /repos/{owner}/{repo}/installation`, obtains that installation Octokit
    through Probot, and creates the `repository_dispatch`.
 
 The incoming installation token must never be assumed to access the control
-repository.
+repository or enterprise team API. Enterprise tokens are used only for team
+membership, not for alert reads/writes or dispatch.
 
 ### Review modes
 
@@ -99,8 +103,10 @@ errors must surface.
 
 The process-local caches are bounded and configurable:
 
-- AppSec team members: default 300 seconds, keyed by organization/team.
+- Enterprise AppSec team members: default 300 seconds, keyed by enterprise/team
+  and shared across target organizations.
 - Verified enterprise App ownership: default 600 seconds.
+- Enterprise installation ID: default 600 seconds.
 - Control repository installation ID: default 600 seconds.
 - Successful delivery/alert operations: default 900 seconds, maximum 1000
   entries.
@@ -119,9 +125,13 @@ The payload is capped at 60,000 characters and contains only:
 - validated target organization, repository, repository ID, alert type, alert
   number, and request IDs;
 - a bounded/redacted request snapshot;
-- sanitized AppSec logins;
+- sanitized enterprise AppSec logins and `review.appsec_team_slug`;
 - source control repository, official webhook event, incoming installation ID,
-  delivery ID when present, and `source.enterprise` in enterprise mode.
+  delivery ID when present, and required `source.enterprise`.
+
+The dispatch's enterprise and full `ent:` team slug must match trusted config.
+Reject old snapshots without these fields; never fall back to organization
+teams or re-fetch membership during SafeOutput assignment.
 
 Do not add opaque webhook objects to the dispatch or agent context. Never pass
 alert content, literal secrets, App credentials, installation tokens, or agent
@@ -133,19 +143,23 @@ evidence.
 
 ## App authentication and permissions
 
-The same GitHub App must be installed:
+The same enterprise-owned GitHub App must be installed:
 
-1. On every monitored organization/repositories, to receive webhooks, deny
-   invalid requests, read team membership, and read/assign alerts.
-2. On the configured control repository owner/repository, to create
+1. On the enterprise account, to read enterprise team membership.
+2. On every monitored organization/repositories, to receive webhooks, deny
+   invalid requests, and read/assign alerts.
+3. On the configured control repository owner/repository, to create
    `repository_dispatch` using `Contents: write`.
+
+Enterprise permissions configured in the enterprise GitHub App UI:
+
+- Enterprise teams: read
 
 Organization permissions configured in the GitHub App UI:
 
 - Organization dismissal requests for code scanning: read/write
 - Organization dismissal requests for Dependabot: read/write
 - Secret scanning alert dismissal requests: read/write
-- Members: read
 
 Repository permissions:
 
@@ -160,18 +174,19 @@ Do not invent manifest permission slugs for delegated-dismissal permissions.
 `app.yml` uses GitHub's current documented slugs, and existing registrations
 must still be updated and verified by display name in the App UI.
 
-The AppSec team slug defaults to `appsec-team`. The team is assumed to hold the
-organization Security Manager role, which supplies repository read and
+The AppSec team slug defaults to `ent:appsec-team`; require the `ent:` prefix.
+The enterprise team is assumed to hold the enterprise Security Manager role,
+which supplies repository read and
 security-alert management access. Do not add per-user collaborator permission
-lookups. Assignment endpoint failures must remain visible.
+lookups or role validation. Assignment endpoint failures must remain visible.
 
-In enterprise mode the App must be enterprise-owned (internal visibility), and
+The App must be enterprise-owned (internal visibility), and
 the central repository must be in an organization in that enterprise. GitHub
 restricts installations of enterprise-owned Apps to the enterprise. Do not
 replace the authenticated App ownership check with a webhook-provided claim or
-add enterprise-wide listing permissions. Each monitored organization needs its
-own team with the configured slug; membership and default help contacts are
-organization-local.
+add enterprise-wide organization listing permissions. Use one enterprise team,
+not per-organization teams. The default help contact uses GitHub's enterprise
+team mention syntax `@/ent:appsec-team`.
 
 ## Agentic workflow behavior
 
@@ -182,7 +197,7 @@ commit both files.
 ### Pre-agent phase
 
 `scripts/export-workflow-config.js` authenticates as the App, verifies enterprise
-ownership when configured, and validates the full dispatch and sender before
+ownership, and validates the full dispatch and sender before
 exporting its target organization for token creation. Both pre-agent and
 SafeOutput jobs run this step with App credentials scoped to that step.
 
@@ -245,19 +260,20 @@ Important defaults:
 | `review_mode` | `deterministic` |
 | `alert_types` | all three alert categories |
 | `agentic.workflow_repository` | `CallMeGreg/agentic-alert-triage` |
-| `agentic.appsec_team_slug` | `appsec-team` |
+| `agentic.appsec_team_slug` | `ent:appsec-team` |
 | `agentic.staged` | `true` |
 | `cache.app_identity_ttl_seconds` | `600` |
+| `cache.enterprise_installation_ttl_seconds` | `600` |
 | `cache.team_members_ttl_seconds` | `300` |
 | `cache.control_installation_ttl_seconds` | `600` |
 | `cache.delivery_dedupe_ttl_seconds` | `900` |
 | `cache.delivery_dedupe_max_entries` | `1000` |
 
-Configure exactly one trust scope for agentic modes: `organization` for legacy
-single-org operation, or `enterprise` (URL slug) for automatic enterprise
-organization onboarding. Never infer the target organization from the control
-repository owner or `GITHUB_REPOSITORY`. In enterprise mode derive it from the
-validated signed-webhook snapshot, and require matching `source.enterprise`.
+`enterprise` (URL slug) is mandatory in every review mode. Reject the removed
+`organization` key even when an enterprise is also configured. Never infer the
+target organization from the control repository owner or `GITHUB_REPOSITORY`.
+Derive it from the validated signed-webhook snapshot, and require matching
+`source.enterprise` and `review.appsec_team_slug`.
 
 ## Required secrets and environment
 

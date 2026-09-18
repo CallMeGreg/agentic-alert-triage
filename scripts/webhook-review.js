@@ -8,7 +8,7 @@ const {
   dispatchAgenticReview,
   getAgenticSettings,
   isStaleDismissalReviewError,
-  listTeamMembers,
+  listEnterpriseTeamMembers,
   loadConfig,
   normalizeTeamLogins,
   redactSensitiveText,
@@ -28,6 +28,7 @@ const MAX_DELIVERY_ID_LENGTH = 128;
 const DEFAULT_CACHE_SETTINGS = {
   teamMembersTtlSeconds: 300,
   controlInstallationTtlSeconds: 600,
+  enterpriseInstallationTtlSeconds: 600,
   appIdentityTtlSeconds: 600,
   deliveryDedupeTtlSeconds: 900,
   deliveryDedupeMaxEntries: 1000,
@@ -158,6 +159,13 @@ function getBoundedConfigNumber(
 function getCacheSettings(config) {
   const cache = config.cache || {};
   return {
+    enterpriseInstallationTtlSeconds: getBoundedConfigNumber(
+      cache.enterprise_installation_ttl_seconds,
+      DEFAULT_CACHE_SETTINGS.enterpriseInstallationTtlSeconds,
+      'cache.enterprise_installation_ttl_seconds',
+      1,
+      3600
+    ),
     appIdentityTtlSeconds: getBoundedConfigNumber(
       cache.app_identity_ttl_seconds,
       DEFAULT_CACHE_SETTINGS.appIdentityTtlSeconds,
@@ -251,7 +259,7 @@ function normalizeDeliveryId(value) {
   return deliveryId;
 }
 
-function validateWebhookContext(context, eventName, settings) {
+function validateWebhookContext(context, eventName) {
   const eventMetadata = WEBHOOK_EVENT_METADATA[eventName];
   if (!eventMetadata) {
     throw new Error(`Unsupported webhook event "${eventName}".`);
@@ -274,15 +282,6 @@ function validateWebhookContext(context, eventName, settings) {
   if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(organizationLogin)) {
     throw new Error('Webhook organization login is invalid.');
   }
-  if (
-    settings.organization &&
-    settings.organization.toLowerCase() !== organizationLogin.toLowerCase()
-  ) {
-    throw new Error(
-      `Webhook organization ${organizationLogin} does not match configured organization ${settings.organization}.`
-    );
-  }
-
   const repository = requireObject(payload.repository, 'Webhook repository');
   const repositoryFullName = requireString(
     repository.full_name,
@@ -546,6 +545,11 @@ function createWebhookReviewHandler(options) {
     maxEntries: 1,
     now,
   });
+  const enterpriseInstallationCache = new BoundedTtlCache({
+    ttlMs: cacheSettings.enterpriseInstallationTtlSeconds * 1000,
+    maxEntries: 1,
+    now,
+  });
   const teamCache =
     options.teamCache ||
     new BoundedTtlCache({
@@ -568,21 +572,40 @@ function createWebhookReviewHandler(options) {
       now,
     });
 
-  async function getTeamLogins(context, event) {
+  async function getEnterpriseOctokit() {
+    const installationId = await enterpriseInstallationCache.getOrLoad(
+      settings.enterprise.toLowerCase(),
+      async () => {
+        const appOctokit = await app.auth();
+        const { data } = await appOctokit.request(
+          'GET /enterprises/{enterprise}/installation',
+          {
+            enterprise: settings.enterprise,
+            headers: { 'X-GitHub-Api-Version': API_VERSION },
+          }
+        );
+        return requirePositiveInteger(data?.id, 'enterprise installation ID');
+      }
+    );
+    return app.auth(installationId);
+  }
+
+  async function getTeamLogins() {
     const cacheKey =
-      `${event.organization}/${settings.teamSlug}`.toLowerCase();
+      `${settings.enterprise}/${settings.teamSlug}`.toLowerCase();
     return teamCache.getOrLoad(cacheKey, async () => {
-      const members = await listTeamMembers(
-        context.octokit,
-        event.organization,
+      const enterpriseOctokit = await getEnterpriseOctokit();
+      const members = await listEnterpriseTeamMembers(
+        enterpriseOctokit,
+        settings.enterprise,
         settings.teamSlug
       );
       const logins = normalizeTeamLogins(
-        members.map((member) => member.login)
+        members.map((member) => member?.login)
       );
       if (logins.length === 0) {
         throw new Error(
-          `The @${event.organization}/${settings.teamSlug} team has no members.`
+          `The ${settings.enterprise}/${settings.teamSlug} enterprise team has no members.`
         );
       }
       return logins;
@@ -634,20 +657,18 @@ function createWebhookReviewHandler(options) {
       };
     }
 
-    const event = validateWebhookContext(context, eventName, settings);
-    if (settings.enterprise) {
-      // GitHub restricts enterprise-owned App installations to that enterprise.
-      await appIdentityCache.getOrLoad(
-        settings.enterprise.toLowerCase(),
-        async () => {
-          const appOctokit = await app.auth();
-          const { data } = await appOctokit.request('GET /app', {
-            headers: { 'X-GitHub-Api-Version': API_VERSION },
-          });
-          validateEnterpriseApp(data, settings.enterprise);
-        }
-      );
-    }
+    const event = validateWebhookContext(context, eventName);
+    // GitHub restricts enterprise-owned App installations to that enterprise.
+    await appIdentityCache.getOrLoad(
+      settings.enterprise.toLowerCase(),
+      async () => {
+        const appOctokit = await app.auth();
+        const { data } = await appOctokit.request('GET /app', {
+          headers: { 'X-GitHub-Api-Version': API_VERSION },
+        });
+        validateEnterpriseApp(data, settings.enterprise);
+      }
+    );
     let commentValidation = { valid: true };
     if (settings.reviewMode !== 'agentic') {
       commentValidation = validateDismissalComment(
@@ -684,7 +705,7 @@ function createWebhookReviewHandler(options) {
     const getDispatchDependencies = () => {
       if (!dispatchDependenciesPromise) {
         dispatchDependenciesPromise = Promise.all([
-          getTeamLogins(context, event),
+          getTeamLogins(),
           getControlOctokit(),
         ]).then(([teamLogins, controlOctokit]) => ({
           teamLogins,
@@ -749,6 +770,7 @@ function createWebhookReviewHandler(options) {
             alertNumber,
             dismissalRequest: event.dismissalRequest,
             teamLogins,
+            teamSlug: settings.teamSlug,
             webhookEvent: eventName,
             deliveryId: event.deliveryId,
             installationId: event.installationId,

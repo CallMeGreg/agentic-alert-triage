@@ -17,6 +17,7 @@ const {
   getAlert,
   isAssignedToTeam,
   isStaleDismissalReviewError,
+  listEnterpriseTeamMembers,
   mergeAssignees,
   sanitizeAlert,
   sanitizeAgentReason,
@@ -31,7 +32,7 @@ const WORKFLOW_REPOSITORY = 'CallMeGreg/agentic-alert-triage';
 function agenticConfig(overrides = {}) {
   return {
     review_mode: 'agentic',
-    organization: 'octo-org',
+    enterprise: 'octo-enterprise',
     alert_types: ['code_scanning', 'secret_scanning', 'dependabot'],
     agentic: {
       workflow_repository: WORKFLOW_REPOSITORY,
@@ -68,9 +69,11 @@ function createDispatchEvent(overrides = {}) {
         dismissal_reasons: ['tests'],
       },
       review: {
+        appsec_team_slug: 'ent:appsec-team',
         appsec_team_members: ['security-one', 'security-two'],
       },
       source: {
+        enterprise: 'octo-enterprise',
         repository: WORKFLOW_REPOSITORY,
         webhook_event: 'dismissal_request_code_scanning',
         delivery_id: 'delivery-123',
@@ -90,9 +93,7 @@ function validationEnv() {
 }
 
 function enterpriseConfig() {
-  const config = agenticConfig();
-  delete config.organization;
-  return { ...config, enterprise: 'octo-enterprise' };
+  return agenticConfig();
 }
 
 function enterpriseDispatchEvent(organization = 'octo-org') {
@@ -105,37 +106,45 @@ function enterpriseDispatchEvent(organization = 'octo-org') {
 
 describe('agentic configuration', () => {
   it('defaults to deterministic review and the central workflow repository', () => {
-    const settings = getAgenticSettings({}, {});
+    const settings = getAgenticSettings({ enterprise: 'octo-enterprise' });
 
     assert.equal(settings.reviewMode, 'deterministic');
-    assert.equal(settings.teamSlug, 'appsec-team');
+    assert.equal(settings.teamSlug, 'ent:appsec-team');
     assert.equal(settings.workflowRepository, DEFAULT_WORKFLOW_REPOSITORY);
     assert.equal(settings.staged, true);
-    assert.equal(settings.helpContact, '@appsec-team');
+    assert.equal(settings.helpContact, '@/ent:appsec-team');
   });
 
-  it('requires a trusted organization for agentic modes', () => {
-    assert.throws(
-      () => getAgenticSettings({ review_mode: 'agentic' }, {}),
-      /requires organization/
-    );
+  it('requires an enterprise slug for every review mode', () => {
+    for (const reviewMode of ['deterministic', 'agentic', 'both']) {
+      assert.throws(
+        () => getAgenticSettings({ review_mode: reviewMode }, validationEnv()),
+        /Invalid GitHub enterprise slug/
+      );
+    }
   });
 
   it('supports enterprise scope without inferring the control repository owner', () => {
     const settings = getAgenticSettings(enterpriseConfig(), validationEnv());
     assert.equal(settings.enterprise, 'octo-enterprise');
-    assert.equal(settings.organization, null);
+    assert.equal(Object.hasOwn(settings, 'organization'), false);
     assert.throws(
       () => getAgenticSettings({ review_mode: 'agentic' }, validationEnv()),
-      /requires organization or enterprise/
+      /Invalid GitHub enterprise slug/
     );
   });
 
-  it('rejects ambiguous and malformed enterprise configuration', () => {
-    assert.throws(
-      () => getAgenticSettings({ ...agenticConfig(), enterprise: 'octo-enterprise' }),
-      /either enterprise or organization/
-    );
+  it('rejects legacy organization configuration and malformed enterprise slugs', () => {
+    for (const organization of ['octo-org', null, '']) {
+      for (const reviewMode of ['deterministic', 'agentic', 'both']) {
+        assert.throws(
+          () => getAgenticSettings({
+            ...agenticConfig(), review_mode: reviewMode, organization,
+          }),
+          /organization is no longer supported/
+        );
+      }
+    }
     for (const enterprise of ['', null, 42, [], {}, '../acme', 'acme\nowner=attacker']) {
       assert.throws(
         () => getAgenticSettings({ ...enterpriseConfig(), enterprise }),
@@ -163,7 +172,7 @@ describe('agentic configuration', () => {
     const settings = getAgenticSettings(
       {
         review_mode: 'agentic',
-        organization: 'octo-org',
+        enterprise: 'octo-enterprise',
         agentic: { workflow_repository: 'control-owner/automation' },
       },
       {}
@@ -182,27 +191,41 @@ describe('agentic configuration', () => {
         getAgenticSettings(
           {
             review_mode: 'agentic',
-            organization: 'octo-org\nowner=attacker',
+            enterprise: 'octo-enterprise\nowner=attacker',
           },
           {}
         ),
-      /Invalid GitHub organization/
+      /Invalid GitHub enterprise slug/
     );
     assert.throws(
       () =>
         getAgenticSettings(
           {
+            enterprise: 'octo-enterprise',
             agentic: { appsec_team_slug: '../appsec' },
           },
           {}
         ),
-      /Invalid AppSec team slug/
+      /Invalid AppSec enterprise team slug/
+    );
+  });
+
+  it('only accepts enterprise team slugs, including the ent: prefix', () => {
+    for (const teamSlug of ['appsec-team', '', null, 'ent:', 'ent:../appsec', 'org/team']) {
+      assert.throws(
+        () => getAgenticSettings(agenticConfig({ appsec_team_slug: teamSlug })),
+        /Expected ent:team-name/
+      );
+    }
+    assert.equal(
+      getAgenticSettings(agenticConfig({ appsec_team_slug: 'ent:security' })).teamSlug,
+      'ent:security'
     );
   });
 });
 
 describe('dispatch payloads', () => {
-  it('validates multiple target organizations and derives organization-local help contacts', () => {
+  it('validates multiple target organizations with one enterprise team help contact', () => {
     for (const organization of ['octo-org', 'second-org']) {
       const target = validateDispatchEvent(
         enterpriseDispatchEvent(organization),
@@ -211,14 +234,14 @@ describe('dispatch payloads', () => {
       );
       assert.equal(target.organization, organization);
       assert.equal(target.owner, organization);
-      assert.equal(target.helpContact, `@${organization}/appsec-team`);
+      assert.equal(target.helpContact, '@/ent:appsec-team');
       const message = formatAgenticDenialMessage({
         config: enterpriseConfig(),
         target,
         dismissalRequest: target.dismissalRequest,
         reason: 'Provide supporting evidence.',
       });
-      assert.match(message, new RegExp(`@${organization}/appsec-team`));
+      assert.match(message, /@\/ent:appsec-team/);
     }
   });
 
@@ -265,6 +288,8 @@ describe('dispatch payloads', () => {
   it('contains a sanitized request, source provenance, and team snapshot', () => {
     const payload = buildDispatchPayload({
       organization: 'octo-org',
+      enterprise: 'octo-enterprise',
+      teamSlug: 'ent:appsec-team',
       sourceRepository: WORKFLOW_REPOSITORY,
       repository: 'octo-org/service',
       repositoryId: 101,
@@ -307,7 +332,9 @@ describe('dispatch payloads', () => {
       'security-one',
       'security-two',
     ]);
+    assert.equal(payload.review.appsec_team_slug, 'ent:appsec-team');
     assert.deepEqual(payload.source, {
+      enterprise: 'octo-enterprise',
       repository: WORKFLOW_REPOSITORY,
       webhook_event: 'dismissal_request_code_scanning',
       installation_id: 44,
@@ -323,6 +350,8 @@ describe('dispatch payloads', () => {
   it('rejects inconsistent event, request type, and repository identity', () => {
     const base = {
       organization: 'octo-org',
+      enterprise: 'octo-enterprise',
+      teamSlug: 'ent:appsec-team',
       sourceRepository: WORKFLOW_REPOSITORY,
       repository: 'octo-org/service',
       repositoryId: 101,
@@ -450,7 +479,7 @@ describe('dispatch payloads', () => {
       () =>
         validateDispatchEvent(
           createDispatchEvent(),
-          { review_mode: 'deterministic', organization: 'octo-org' },
+          { review_mode: 'deterministic', enterprise: 'octo-enterprise' },
           validationEnv()
         ),
       /Agentic review is disabled/
@@ -466,6 +495,23 @@ describe('dispatch payloads', () => {
           validationEnv()
         ),
       /not enabled/
+    );
+  });
+
+  it('rejects missing, organization-local, or mismatched team snapshots', () => {
+    for (const teamSlug of [undefined, 'appsec-team', 'ent:another-team', {}]) {
+      const event = createDispatchEvent();
+      event.client_payload.review.appsec_team_slug = teamSlug;
+      assert.throws(
+        () => validateDispatchEvent(event, agenticConfig(), validationEnv()),
+        /Dispatch AppSec enterprise team does not match/
+      );
+    }
+    const event = createDispatchEvent();
+    event.client_payload.review.appsec_team_members = [null];
+    assert.throws(
+      () => validateDispatchEvent(event, agenticConfig(), validationEnv()),
+      /logins must be strings/
     );
   });
 });
@@ -505,6 +551,7 @@ describe('workflow target export before installation token creation', () => {
     wrongSource.client_payload.source.repository = 'attacker/control';
     const badOrganization = enterpriseDispatchEvent('octo-org\nowner=attacker');
     const missingEnterprise = createDispatchEvent();
+    delete missingEnterprise.client_payload.source.enterprise;
     const wrongSchema = enterpriseDispatchEvent();
     wrongSchema.client_payload.schema_version = 99;
     for (const event of [wrongSender, wrongSource, badOrganization, missingEnterprise, wrongSchema]) {
@@ -527,15 +574,13 @@ describe('workflow target export before installation token creation', () => {
     }
   });
 
-  it('retains explicit single-organization support for organization-owned Apps', async () => {
-    const target = await resolveWorkflowTarget({
+  it('rejects organization-owned Apps even when the organization matches the target', async () => {
+    await assert.rejects(resolveWorkflowTarget({
       config: agenticConfig(),
       event: createDispatchEvent(),
       appOctokit: appClient({ login: 'octo-org', type: 'Organization' }),
       env: validationEnv(),
-    });
-    assert.equal(target.organization, 'octo-org');
-    assert.equal(target.enterprise, null);
+    }), /requires a GitHub App owned by enterprise/);
   });
 
   it('surfaces App authentication failures without exporting a target', async () => {
@@ -629,13 +674,14 @@ describe('alert handling', () => {
   it('redacts detected and token-shaped secrets from agent evidence', () => {
     const context = buildReviewContext({
       target: {
+        enterprise: 'octo-enterprise',
         organization: 'octo-org',
         repository: 'octo-org/service',
         alertType: 'secret_scanning',
         alertNumber: 8,
         dismissalRequestId: 20,
         dismissalRequestNumber: 2,
-        teamSlug: 'appsec-team',
+        teamSlug: 'ent:appsec-team',
         staged: true,
         dryRun: false,
         webhookEvent: 'dismissal_request_secret_scanning',
@@ -669,6 +715,8 @@ describe('alert handling', () => {
       ],
     });
     const serialized = JSON.stringify(context);
+    assert.equal(context.target.enterprise, 'octo-enterprise');
+    assert.equal(context.target.appsec_team_slug, 'ent:appsec-team');
 
     assert.doesNotMatch(serialized, /actual-secret/);
     assert.doesNotMatch(serialized, /must-not-pass-through/);
@@ -729,8 +777,8 @@ describe('alert handling', () => {
       octokit,
       owner: 'octo-org',
       repo: 'service',
-      organization: 'octo-org',
-      teamSlug: 'appsec-team',
+      enterprise: 'octo-enterprise',
+      teamSlug: 'ent:appsec-team',
       alertType: 'code_scanning',
       alertNumber: 8,
       alert: { assignees: [{ login: 'existing' }] },
@@ -760,14 +808,49 @@ describe('alert handling', () => {
         },
         owner: 'octo-org',
         repo: 'service',
-        organization: 'octo-org',
-        teamSlug: 'appsec-team',
+        enterprise: 'octo-enterprise',
+        teamSlug: 'ent:appsec-team',
         alertType: 'dependabot',
         alertNumber: 8,
         alert: { assignees: [] },
         teamMembers: ['security-one'],
       }),
       /assignment rejected/
+    );
+  });
+
+  it('requires a team snapshot rather than looking up organization membership', async () => {
+    await assert.rejects(assignAlertToTeam({
+      octokit: {
+        paginate: async () => assert.fail('No membership lookup is allowed during assignment'),
+        request: async () => assert.fail('No assignment without a snapshot'),
+      },
+      enterprise: 'octo-enterprise',
+      teamSlug: 'ent:appsec-team',
+      owner: 'octo-org',
+      repo: 'service',
+      alertType: 'code_scanning',
+      alertNumber: 8,
+      alert: {},
+    }), /enterprise team membership snapshot is required/);
+  });
+
+  it('paginates the enterprise team memberships endpoint without organization parameters', async () => {
+    const members = [{ login: 'security-one' }, { login: 'security-two' }];
+    const octokit = {
+      paginate: async (endpoint, parameters) => {
+        assert.equal(endpoint, 'GET /enterprises/{enterprise}/teams/{enterprise-team}/memberships');
+        assert.equal(parameters.enterprise, 'octo-enterprise');
+        assert.equal(parameters['enterprise-team'], 'ent:appsec-team');
+        assert.equal(parameters.per_page, 100);
+        assert.equal(Object.hasOwn(parameters, 'org'), false);
+        assert.equal(Object.hasOwn(parameters, 'role'), false);
+        return members;
+      },
+    };
+    assert.deepEqual(
+      await listEnterpriseTeamMembers(octokit, 'octo-enterprise', 'ent:appsec-team'),
+      members
     );
   });
 });

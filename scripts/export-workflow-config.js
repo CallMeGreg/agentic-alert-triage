@@ -24,9 +24,7 @@ async function resolveWorkflowTarget({
   const { data: appInfo } = await appOctokit.request('GET /app', {
     headers: { 'X-GitHub-Api-Version': API_VERSION },
   });
-  if (settings.enterprise) {
-    validateEnterpriseApp(appInfo, settings.enterprise);
-  }
+  validateEnterpriseApp(appInfo, settings.enterprise);
   if (
     typeof appInfo.slug !== 'string' ||
     !/^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/.test(appInfo.slug)

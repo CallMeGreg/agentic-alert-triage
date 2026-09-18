@@ -29,12 +29,12 @@ const EVENT_DEFINITIONS = {
 
 function createConfig(overrides = {}) {
   return {
-    organization: 'octo-org',
+    enterprise: 'octo-enterprise',
     review_mode: 'agentic',
     alert_types: ['code_scanning', 'dependabot', 'secret_scanning'],
     agentic: {
       workflow_repository: WORKFLOW_REPOSITORY,
-      appsec_team_slug: 'appsec-team',
+      appsec_team_slug: 'ent:appsec-team',
       staged: true,
     },
     cache: {
@@ -127,6 +127,7 @@ function createHarness({
   dispatchFailure,
   teamFailure,
   installationFailure,
+  enterpriseInstallationFailure,
   appInfo = { slug: 'alert-dismissal-bot', owner: { slug: 'octo-enterprise' } },
   appFailure,
   now,
@@ -141,15 +142,19 @@ function createHarness({
   let dispatchAttempts = 0;
 
   const incomingOctokit = {
+    paginate: async () => assert.fail('Organization tokens must not read team membership'),
+    request: async (endpoint, parameters) => {
+      calls.incomingRequests.push({ endpoint, parameters });
+      return { data: {} };
+    },
+  };
+  const enterpriseOctokit = {
     paginate: async (endpoint, parameters) => {
       calls.teamLookups.push({ endpoint, parameters });
       if (teamFailure) throw teamFailure;
       return typeof teamMembers === 'function' ? teamMembers(parameters) : teamMembers;
     },
-    request: async (endpoint, parameters) => {
-      calls.incomingRequests.push({ endpoint, parameters });
-      return { data: {} };
-    },
+    request: async () => assert.fail('Enterprise token must not access alerts or dispatch'),
   };
   const appOctokit = {
     request: async (endpoint, parameters) => {
@@ -158,6 +163,17 @@ function createHarness({
         if (appFailure) throw appFailure;
         return { data: appInfo };
       }
+      if (endpoint === 'GET /enterprises/{enterprise}/installation') {
+        assert.equal(parameters.enterprise, config.enterprise);
+        if (enterpriseInstallationFailure) {
+          const failure = typeof enterpriseInstallationFailure === 'function'
+            ? enterpriseInstallationFailure()
+            : enterpriseInstallationFailure;
+          if (failure) throw failure;
+        }
+        return { data: { id: 8001 } };
+      }
+      assert.equal(endpoint, 'GET /repos/{owner}/{repo}/installation');
       if (installationFailure) throw installationFailure;
       return { data: { id: 9001 } };
     },
@@ -180,6 +196,7 @@ function createHarness({
     auth: async (installationId) => {
       calls.appAuth.push(installationId ?? null);
       if (installationId == null) return appOctokit;
+      if (installationId === 8001) return enterpriseOctokit;
       assert.equal(installationId, 9001);
       return controlOctokit;
     },
@@ -203,9 +220,7 @@ function createHarness({
 
 describe('enterprise installation routing', () => {
   function enterpriseConfig(overrides = {}) {
-    const config = createConfig({ enterprise: 'octo-enterprise', ...overrides });
-    delete config.organization;
-    return config;
+    return createConfig(overrides);
   }
 
   function organizationContext(organization, installationId, octokit, alertType = 'code_scanning') {
@@ -224,11 +239,11 @@ describe('enterprise installation routing', () => {
     });
   }
 
-  it('routes every installed org to one control repo without sharing team or delivery caches', async () => {
+  it('shares one enterprise team across orgs while isolating alert delivery caches', async () => {
     const config = enterpriseConfig();
     const harness = createHarness({
       config,
-      teamMembers: ({ org }) => [{ login: `${org}-security` }],
+      teamMembers: ({ enterprise }) => [{ login: `${enterprise}-security` }],
     });
     for (const alertType of Object.keys(EVENT_DEFINITIONS)) {
       const contexts = [
@@ -241,14 +256,14 @@ describe('enterprise installation routing', () => {
       assert.deepEqual(retries.map((result) => result.duplicateCount), [1, 1]);
     }
     assert.equal(harness.calls.controlRequests.length, 6);
-    assert.equal(harness.calls.teamLookups.length, 2);
+    assert.equal(harness.calls.teamLookups.length, 1);
     assert.equal(
       harness.calls.appRequests.filter(({ endpoint }) => endpoint === 'GET /app').length,
       1
     );
     assert.equal(
       harness.calls.appRequests.filter(({ endpoint }) => endpoint.includes('/installation')).length,
-      1
+      2
     );
     assert.equal(harness.calls.incomingRequests.length, 0);
     for (const { parameters } of harness.calls.controlRequests) {
@@ -256,7 +271,8 @@ describe('enterprise installation routing', () => {
       const payload = parameters.client_payload;
       const org = payload.target.organization;
       assert.equal(payload.source.enterprise, 'octo-enterprise');
-      assert.deepEqual(payload.review.appsec_team_members, [`${org}-security`]);
+      assert.equal(payload.review.appsec_team_slug, 'ent:appsec-team');
+      assert.deepEqual(payload.review.appsec_team_members, ['octo-enterprise-security']);
       const target = validateDispatchEvent({
         action: 'alert-dismissal-requested',
         repository: { full_name: WORKFLOW_REPOSITORY },
@@ -336,6 +352,84 @@ describe('enterprise installation routing', () => {
       assert.equal(result.action, 'denied');
     }
     assert.equal(harness.calls.controlRequests.length, 0);
+  });
+
+  it('rejects legacy or missing enterprise scope when the service starts', () => {
+    assert.throws(
+      () => createHarness({ config: { ...createConfig(), organization: 'octo-org' } }),
+      /organization is no longer supported/
+    );
+    const config = createConfig();
+    delete config.enterprise;
+    assert.throws(() => createHarness({ config }), /Invalid GitHub enterprise slug/);
+  });
+
+  it('surfaces enterprise installation failures and retries failed lookups', async () => {
+    let attempt = 0;
+    const harness = createHarness({
+      enterpriseInstallationFailure: () => {
+        attempt += 1;
+        return attempt === 1
+          ? Object.assign(new Error('enterprise installation missing'), { status: 404 })
+          : null;
+      },
+    });
+    const context = createContext({ octokit: harness.incomingOctokit });
+    await assert.rejects(harness.handler(context), /enterprise installation missing/);
+    assert.equal(harness.calls.teamLookups.length, 0);
+    assert.equal(harness.calls.controlRequests.length, 0);
+    assert.equal((await harness.handler(context)).action, 'dispatched');
+    assert.equal(attempt, 2);
+    assert.equal(harness.calls.teamLookups.length, 1);
+  });
+
+  it('rejects empty or malformed enterprise membership and retries failed team loads', async () => {
+    for (const invalidMembers of [[], [{}], [{ login: null }]]) {
+      let attempt = 0;
+      const harness = createHarness({
+        teamMembers: () => {
+          attempt += 1;
+          return attempt === 1 ? invalidMembers : [{ login: 'security-one' }];
+        },
+      });
+      const context = createContext({ octokit: harness.incomingOctokit });
+      await assert.rejects(harness.handler(context), /no members|logins must be strings/);
+      assert.equal(harness.calls.controlRequests.length, 0);
+      assert.equal((await harness.handler(context)).action, 'dispatched');
+      assert.equal(attempt, 2);
+    }
+  });
+
+  it('expires enterprise membership and installation caches independently', async () => {
+    let now = 0;
+    let member = 'security-one';
+    const harness = createHarness({
+      config: createConfig({
+        cache: {
+          team_members_ttl_seconds: 1,
+          enterprise_installation_ttl_seconds: 2,
+        },
+      }),
+      teamMembers: () => [{ login: member }],
+      now: () => now,
+    });
+    for (const [id, time, login] of [
+      ['first', 0, 'security-one'],
+      ['second', 1001, 'security-two'],
+      ['third', 2001, 'security-three'],
+    ]) {
+      now = time;
+      member = login;
+      await harness.handler(createContext({ id, octokit: harness.incomingOctokit }));
+    }
+    assert.equal(harness.calls.teamLookups.length, 3);
+    assert.equal(harness.calls.appRequests.filter(
+      ({ endpoint }) => endpoint === 'GET /enterprises/{enterprise}/installation'
+    ).length, 2);
+    assert.deepEqual(
+      harness.calls.controlRequests.map(({ parameters }) => parameters.client_payload.review.appsec_team_members),
+      [['security-one'], ['security-two'], ['security-three']]
+    );
   });
 });
 
@@ -437,8 +531,7 @@ describe('webhook registration and validation', () => {
       () =>
         validateWebhookContext(
           context,
-          'dismissal_request_code_scanning',
-          { organization: 'octo-org' }
+          'dismissal_request_code_scanning'
         ),
       /does not match/
     );
@@ -453,8 +546,7 @@ describe('webhook registration and validation', () => {
               action: 'response_submitted',
             }),
           }),
-          'dismissal_request_code_scanning',
-          { organization: 'octo-org' }
+          'dismissal_request_code_scanning'
         ),
       /Expected "created"/
     );
@@ -471,8 +563,7 @@ describe('webhook registration and validation', () => {
               alertNumbers: tooMany,
             }),
           }),
-          'dismissal_request_code_scanning',
-          { organization: 'octo-org' }
+          'dismissal_request_code_scanning'
         ),
       /must contain 1-100 alerts/
     );
@@ -559,6 +650,7 @@ describe('agentic webhook dispatch', () => {
       'used in tests',
     ]);
     assert.deepEqual(dispatch.source, {
+      enterprise: 'octo-enterprise',
       repository: WORKFLOW_REPOSITORY,
       webhook_event: 'dismissal_request_secret_scanning',
       installation_id: 44,
@@ -576,7 +668,7 @@ describe('agentic webhook dispatch', () => {
     );
   });
 
-  it('caches sanitized AppSec team membership per organization and team', async () => {
+  it('caches sanitized enterprise team membership using the enterprise installation', async () => {
     const harness = createHarness();
     await harness.handler(
       createContext({
@@ -594,6 +686,13 @@ describe('agentic webhook dispatch', () => {
     );
 
     assert.equal(harness.calls.teamLookups.length, 1);
+    assert.equal(
+      harness.calls.teamLookups[0].endpoint,
+      'GET /enterprises/{enterprise}/teams/{enterprise-team}/memberships'
+    );
+    assert.equal(harness.calls.teamLookups[0].parameters.enterprise, 'octo-enterprise');
+    assert.equal(harness.calls.teamLookups[0].parameters['enterprise-team'], 'ent:appsec-team');
+    assert.equal(harness.calls.appAuth.filter((id) => id === 8001).length, 1);
     const payloads = harness.calls.controlRequests.map(
       (call) => call.parameters.client_payload
     );
@@ -624,15 +723,18 @@ describe('agentic webhook dispatch', () => {
       'dismissal_request_code_scanning'
     );
 
-    assert.deepEqual(harness.calls.appAuth, [null, 9001, 9001]);
-    assert.equal(harness.calls.appRequests.length, 1);
+    assert.equal(harness.calls.appAuth.filter((id) => id === 9001).length, 2);
+    const controlLookups = harness.calls.appRequests.filter(
+      ({ endpoint }) => endpoint === 'GET /repos/{owner}/{repo}/installation'
+    );
+    assert.equal(controlLookups.length, 1);
     assert.equal(
-      harness.calls.appRequests[0].endpoint,
+      controlLookups[0].endpoint,
       'GET /repos/{owner}/{repo}/installation'
     );
-    assert.equal(harness.calls.appRequests[0].parameters.owner, 'CallMeGreg');
+    assert.equal(controlLookups[0].parameters.owner, 'CallMeGreg');
     assert.equal(
-      harness.calls.appRequests[0].parameters.repo,
+      controlLookups[0].parameters.repo,
       'agentic-alert-triage'
     );
     assert.equal(
@@ -670,11 +772,11 @@ describe('review modes and retry behavior', () => {
       harness.calls.incomingRequests[0].endpoint,
       'PATCH /repos/{owner}/{repo}/dismissal-requests/code-scanning/{alert_number}'
     );
-    assert.equal(harness.calls.appAuth.length, 0);
+    assert.deepEqual(harness.calls.appAuth, [null]);
     assert.equal(harness.calls.teamLookups.length, 0);
   });
 
-  it('leaves valid deterministic requests open without extra API calls', async () => {
+  it('leaves valid deterministic requests open after verifying enterprise App ownership', async () => {
     const harness = createHarness({
       config: createConfig({
         review_mode: 'deterministic',
@@ -694,7 +796,7 @@ describe('review modes and retry behavior', () => {
 
     assert.equal(result.action, 'leave_open');
     assert.equal(harness.calls.incomingRequests.length, 0);
-    assert.equal(harness.calls.appAuth.length, 0);
+    assert.deepEqual(harness.calls.appAuth, [null]);
   });
 
   it('dispatches every request in agentic mode regardless of deterministic criteria', async () => {

@@ -46,7 +46,7 @@ async function main() {
 
   if (isAssignedToTeam(target.alertType, alert, target.teamLogins)) {
     appendNoop(
-      `Alert #${target.alertNumber} is already assigned to @${target.organization}/${target.teamSlug}.`
+      `Alert #${target.alertNumber} is already assigned to enterprise team ${target.teamSlug}.`
     );
     console.log('Alert is already assigned to the AppSec team; skipping agent execution.');
     return;

@@ -89,7 +89,7 @@ async function main() {
     octokit,
     owner: target.owner,
     repo: target.repo,
-    organization: target.organization,
+    enterprise: target.enterprise,
     teamSlug: target.teamSlug,
     alertType: target.alertType,
     alertNumber: target.alertNumber,

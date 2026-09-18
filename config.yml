@@ -1,12 +1,8 @@
 # Alert dismissal triage configuration
 
-# Choose ONE trust scope. Existing single-organization deployments use:
-organization: callmegreg-demo-org
-# To accept every organization installation of an enterprise-owned App,
-# remove organization above and set the enterprise's URL slug instead:
-# enterprise: your-enterprise
-# No organization allowlist is needed. The App must be owned by this
-# enterprise, and the central workflow repo must be in one of its orgs.
+# Required enterprise URL slug. The App must be owned by this enterprise.
+# organization is not supported. No organization allowlist is needed.
+enterprise: your-enterprise
 
 # deterministic: deny comments that fail the configured criteria.
 # agentic: dispatch every created request to the gh-aw workflow.
@@ -15,11 +11,8 @@ review_mode: deterministic
 
 # Optional deterministic criteria. If all are omitted, every comment passes.
 # required_phrase: "mitigating control"
-required_pattern: "https://github\\.com/callmegreg-demo-org/[a-zA-Z0-9._-]+/issues/\\d+"
-# For enterprise mode, replace the single-org example above with your shared
-# policy. This alternative checks URL format only; agentic evidence remains
-# restricted to the target organization:
-# required_pattern: "https://github\\.com/[a-zA-Z0-9-]+/[a-zA-Z0-9._-]+/issues/\\d+"
+# URL-format check only; agentic evidence remains restricted to the target org.
+required_pattern: "https://github\\.com/[a-zA-Z0-9-]+/[a-zA-Z0-9._-]+/issues/\\d+"
 # minimum_length: 20
 case_sensitive: false
 
@@ -34,18 +27,19 @@ agentic:
   # Central repository containing the compiled agentic workflow. The GitHub
   # App must also be installed on this repository (or its owner) with
   # Contents: write so it can create repository_dispatch events.
-  # In enterprise mode, replace this with a repository in your enterprise.
-  workflow_repository: CallMeGreg/agentic-alert-triage
+  # Replace this example with a repository in your enterprise.
+  workflow_repository: your-security-org/alert-triage
 
-  # A team with this slug must exist in EACH monitored organization and hold
-  # that organization's Security Manager role. Membership is resolved locally.
-  appsec_team_slug: appsec-team
+  # One enterprise team, assumed to hold the enterprise Security Manager role.
+  # Use the full enterprise team slug, including GitHub's ent: prefix.
+  # The App needs an enterprise installation with Enterprise teams: read.
+  appsec_team_slug: ent:appsec-team
 
   # Preview SafeOutput decisions until the workflow has been evaluated.
   staged: true
 
-  # Defaults to "@<organization>/<appsec_team_slug>" when omitted.
-  # help_contact: "@callmegreg-demo-org/appsec-team"
+  # Defaults to "@/<appsec_team_slug>" when omitted.
+  # help_contact: "@/ent:appsec-team"
 
   # Optional denial template. Available placeholders:
   # {requester}, {denial_reason}, {help_contact}, {alert_type},
@@ -58,6 +52,7 @@ agentic:
 # GitHub API calls. They are not a durable queue or cross-replica lock.
 cache:
   app_identity_ttl_seconds: 600
+  enterprise_installation_ttl_seconds: 600
   team_members_ttl_seconds: 300
   control_installation_ttl_seconds: 600
   delivery_dedupe_ttl_seconds: 900
