@@ -48,6 +48,10 @@ or redacted, and ambiguous requests are denied rather than guessed.
 
 ## Setup
 
+> [!TIP]
+> Try opening this repository in the [GitHub Copilot App](https://github.com/github/app) and prompting Copilot in `Interactive` mode like this:
+> > "Guide me through step by step setup of this app in my enterprise `YOUR_ENTERPRISE_SLUG` where I'll be installing the app in `YOUR_ORG_SLUGS` orgs.
+
 ### 1. Meet the prerequisites
 
 - Node.js 22 or newer. GitHub Actions may use Node.js 24.
