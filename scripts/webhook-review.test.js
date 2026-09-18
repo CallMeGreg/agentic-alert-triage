@@ -700,6 +700,7 @@ describe('agentic webhook dispatch', () => {
       'security-one',
       'security-two',
     ]);
+    assert.equal(payloads[0].review.model, 'auto');
     assert.deepEqual(
       payloads[1].review.appsec_team_members,
       payloads[0].review.appsec_team_members

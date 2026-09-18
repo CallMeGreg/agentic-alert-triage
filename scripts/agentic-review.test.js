@@ -10,7 +10,7 @@ const {
   assignAlertToTeam,
   buildDispatchPayload,
   buildReviewContext,
-  DEFAULT_WORKFLOW_REPOSITORY,
+  DEFAULT_MODEL,
   extractIssueReferences,
   formatAgenticDenialMessage,
   getAgenticSettings,
@@ -71,6 +71,7 @@ function createDispatchEvent(overrides = {}) {
       review: {
         appsec_team_slug: 'ent:appsec-team',
         appsec_team_members: ['security-one', 'security-two'],
+        model: 'auto',
       },
       source: {
         enterprise: 'octo-enterprise',
@@ -105,14 +106,25 @@ function enterpriseDispatchEvent(organization = 'octo-org') {
 }
 
 describe('agentic configuration', () => {
-  it('defaults to deterministic review and the central workflow repository', () => {
-    const settings = getAgenticSettings({ enterprise: 'octo-enterprise' });
+  it('defaults to both review modes and the automatic model', () => {
+    const settings = getAgenticSettings({
+      enterprise: 'octo-enterprise',
+      agentic: { workflow_repository: WORKFLOW_REPOSITORY },
+    });
 
-    assert.equal(settings.reviewMode, 'deterministic');
+    assert.equal(settings.reviewMode, 'both');
     assert.equal(settings.teamSlug, 'ent:appsec-team');
-    assert.equal(settings.workflowRepository, DEFAULT_WORKFLOW_REPOSITORY);
+    assert.equal(settings.workflowRepository, WORKFLOW_REPOSITORY);
+    assert.equal(settings.model, DEFAULT_MODEL);
     assert.equal(settings.staged, true);
     assert.equal(settings.helpContact, '@/ent:appsec-team');
+  });
+
+  it('requires the central workflow repository', () => {
+    assert.throws(
+      () => getAgenticSettings({ enterprise: 'octo-enterprise' }),
+      /agentic\.workflow_repository is required/
+    );
   });
 
   it('requires an enterprise slug for every review mode', () => {
@@ -179,6 +191,19 @@ describe('agentic configuration', () => {
     );
 
     assert.equal(settings.workflowRepository, 'control-owner/automation');
+  });
+
+  it('accepts a configured model and rejects invalid values', () => {
+    assert.equal(
+      getAgenticSettings(agenticConfig({ model: 'gpt-5.4' })).model,
+      'gpt-5.4'
+    );
+    for (const model of ['', null, 42, 'model name', 'model\nname']) {
+      assert.throws(
+        () => getAgenticSettings(agenticConfig({ model })),
+        /Invalid agentic\.model/
+      );
+    }
   });
 
   it('rejects unknown review modes and invalid trusted identifiers', () => {
@@ -313,6 +338,7 @@ describe('dispatch payloads', () => {
         responses: [{ body: 'opaque' }],
       },
       teamLogins: ['security-two', 'security-one'],
+      model: 'auto',
       webhookEvent: 'dismissal_request_code_scanning',
       deliveryId: 'delivery-123',
       installationId: 44,
@@ -333,6 +359,7 @@ describe('dispatch payloads', () => {
       'security-two',
     ]);
     assert.equal(payload.review.appsec_team_slug, 'ent:appsec-team');
+    assert.equal(payload.review.model, 'auto');
     assert.deepEqual(payload.source, {
       enterprise: 'octo-enterprise',
       repository: WORKFLOW_REPOSITORY,
@@ -370,6 +397,7 @@ describe('dispatch payloads', () => {
         },
       },
       teamLogins: ['security-one'],
+      model: 'auto',
       webhookEvent: 'dismissal_request_code_scanning',
       installationId: 44,
     };
@@ -479,7 +507,11 @@ describe('dispatch payloads', () => {
       () =>
         validateDispatchEvent(
           createDispatchEvent(),
-          { review_mode: 'deterministic', enterprise: 'octo-enterprise' },
+          {
+            review_mode: 'deterministic',
+            enterprise: 'octo-enterprise',
+            agentic: { workflow_repository: WORKFLOW_REPOSITORY },
+          },
           validationEnv()
         ),
       /Agentic review is disabled/
@@ -512,6 +544,15 @@ describe('dispatch payloads', () => {
     assert.throws(
       () => validateDispatchEvent(event, agenticConfig(), validationEnv()),
       /logins must be strings/
+    );
+  });
+
+  it('rejects a dispatch model that does not match trusted configuration', () => {
+    const event = createDispatchEvent();
+    event.client_payload.review.model = 'gpt-5.4';
+    assert.throws(
+      () => validateDispatchEvent(event, agenticConfig(), validationEnv()),
+      /model does not match/
     );
   });
 });
@@ -631,6 +672,12 @@ describe('workflow target export before installation token creation', () => {
     }
     assert.equal(workflow.tools.github, false);
     assert.equal(workflow.tools.edit, false);
+    assert.equal(workflow.engine.id, 'copilot');
+    assert.equal(
+      workflow.engine.model,
+      '${{ github.event.client_payload.review.model }}'
+    );
+    assert.equal(workflow['max-turns'], 50);
     assert.equal(workflow['safe-outputs']['threat-detection'].enabled, true);
     assert.equal(workflow.concurrency['cancel-in-progress'], true);
     assert.match(workflow.concurrency.group, /client_payload.target.repository/);

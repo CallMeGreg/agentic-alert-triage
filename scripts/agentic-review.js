@@ -7,7 +7,7 @@ const yaml = require('js-yaml');
 const API_VERSION = '2026-03-10';
 const DISPATCH_EVENT_TYPE = 'alert-dismissal-requested';
 const DISPATCH_SCHEMA_VERSION = 1;
-const DEFAULT_WORKFLOW_REPOSITORY = 'CallMeGreg/agentic-alert-triage';
+const DEFAULT_MODEL = 'auto';
 const MAX_DISPATCH_PAYLOAD_LENGTH = 60000;
 const MAX_DENIAL_MESSAGE_LENGTH = 2048;
 const MAX_AGENT_REASON_LENGTH = 1200;
@@ -85,8 +85,21 @@ function validateEnterpriseApp(appInfo, enterprise) {
   }
 }
 
+function getAgenticModel(value) {
+  const model = value === undefined ? DEFAULT_MODEL : value;
+  if (
+    typeof model !== 'string' ||
+    model.length === 0 ||
+    model.length > 128 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._/?=&-]*$/.test(model)
+  ) {
+    throw new Error(`Invalid agentic.model "${model}".`);
+  }
+  return model;
+}
+
 function getAgenticSettings(config) {
-  const reviewMode = config.review_mode || 'deterministic';
+  const reviewMode = config.review_mode || 'both';
   if (!['deterministic', 'agentic', 'both'].includes(reviewMode)) {
     throw new Error(
       `Invalid review_mode "${reviewMode}". Expected deterministic, agentic, or both.`
@@ -105,8 +118,11 @@ function getAgenticSettings(config) {
       ? 'ent:appsec-team'
       : agentic.appsec_team_slug
   );
-  const workflowRepository =
-    agentic.workflow_repository || DEFAULT_WORKFLOW_REPOSITORY;
+  const workflowRepository = agentic.workflow_repository;
+  if (!workflowRepository) {
+    throw new Error('agentic.workflow_repository is required.');
+  }
+  const model = getAgenticModel(agentic.model);
 
   splitRepository(workflowRepository);
 
@@ -115,6 +131,7 @@ function getAgenticSettings(config) {
     enterprise,
     teamSlug,
     workflowRepository,
+    model,
     staged: agentic.staged !== false,
     helpContact: agentic.help_contact || `@/${teamSlug}`,
     denialMessage: agentic.denial_message || null,
@@ -205,6 +222,7 @@ function buildDispatchPayload({
   dismissalRequest,
   teamLogins,
   teamSlug,
+  model,
   webhookEvent,
   deliveryId = null,
   installationId,
@@ -283,6 +301,7 @@ function buildDispatchPayload({
     review: {
       appsec_team_slug: getEnterpriseTeamSlug(teamSlug),
       appsec_team_members: normalizedTeamLogins,
+      model: getAgenticModel(model),
     },
     source: {
       repository: `${source.owner}/${source.repo}`,
@@ -866,6 +885,11 @@ function validateDispatchEvent(event, config, env = process.env) {
   if (teamLogins.length === 0) {
     throw new Error('Dispatch payload contains no AppSec team members.');
   }
+  if (payload.review?.model !== settings.model) {
+    throw new Error(
+      'Dispatch agentic model does not match the configured model.'
+    );
+  }
 
   if (
     settings.workflowRepository &&
@@ -1105,7 +1129,7 @@ function isStaleDismissalReviewError(error) {
 module.exports = {
   ALERT_TYPE_METADATA,
   API_VERSION,
-  DEFAULT_WORKFLOW_REPOSITORY,
+  DEFAULT_MODEL,
   DISPATCH_EVENT_TYPE,
   appendNoop,
   assignAlertToTeam,

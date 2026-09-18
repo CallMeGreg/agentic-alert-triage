@@ -771,6 +771,7 @@ function createWebhookReviewHandler(options) {
             dismissalRequest: event.dismissalRequest,
             teamLogins,
             teamSlug: settings.teamSlug,
+            model: settings.model,
             webhookEvent: eventName,
             deliveryId: event.deliveryId,
             installationId: event.installationId,
