@@ -215,24 +215,6 @@ The model never receives App credentials or installation tokens. Copilot
 inference uses `copilot-requests: write` on the workflow's built-in Actions
 token.
 
-### 6. Compile and stage the workflow
-
-The generated
-[`agentic-dismissal-review.lock.yml`](.github/workflows/agentic-dismissal-review.lock.yml)
-comes from
-[`agentic-dismissal-review.md`](.github/workflows/agentic-dismissal-review.md).
-Never edit the lock file directly.
-
-```bash
-npm install
-npm run compile:agentic
-```
-
-Commit both workflow files and deploy them to the control repository's default
-branch. Keep `agentic.staged: true` while reviewing workflow summaries and
-gh-aw audit logs. Set it to `false` only when decisions are ready to write.
-Restart Probot after configuration changes.
-
 ## Deploy
 
 Set the GitHub App webhook URL to the public Probot endpoint:
@@ -271,6 +253,24 @@ See Probot's
 [deployment](https://probot.github.io/docs/deployment/) guides.
 
 ## Development
+
+### Compile and stage the workflow
+
+The generated
+[`agentic-dismissal-review.lock.yml`](.github/workflows/agentic-dismissal-review.lock.yml)
+comes from
+[`agentic-dismissal-review.md`](.github/workflows/agentic-dismissal-review.md).
+Never edit the lock file directly.
+
+```bash
+npm install
+npm run compile:agentic
+```
+
+Commit both workflow files and deploy them to the control repository's default
+branch. Keep `agentic.staged: true` while reviewing workflow summaries and
+gh-aw audit logs. Set it to `false` only when decisions are ready to write.
+Restart Probot after configuration changes.
 
 For local webhook development:
 
