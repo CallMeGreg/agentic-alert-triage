@@ -6,7 +6,7 @@ const yaml = require('js-yaml');
 
 const API_VERSION = '2026-03-10';
 const DISPATCH_EVENT_TYPE = 'alert-dismissal-requested';
-const DISPATCH_SCHEMA_VERSION = 2;
+const DISPATCH_SCHEMA_VERSION = 1;
 const MAX_DISPATCH_PAYLOAD_LENGTH = 60000;
 const MAX_DENIAL_MESSAGE_LENGTH = 2048;
 const MAX_AGENT_REASON_LENGTH = 1200;

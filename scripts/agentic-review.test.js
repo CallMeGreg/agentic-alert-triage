@@ -23,7 +23,7 @@ function createDispatchEvent(overrides = {}) {
     action: 'alert-dismissal-requested',
     sender: { login: 'alert-dismissal-bot[bot]' },
     client_payload: {
-      schema_version: 2,
+      schema_version: 1,
       target: {
         organization: 'octo-org',
         repository: 'octo-org/service',
@@ -141,7 +141,7 @@ describe('dispatch payloads', () => {
       runId: '123',
     });
 
-    assert.equal(payload.schema_version, 2);
+    assert.equal(payload.schema_version, 1);
     assert.equal(payload.target.repository, 'octo-org/service');
     assert.equal(payload.target.alert_number, 12);
     assert.equal(payload.request.id, 99);

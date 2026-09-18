@@ -279,7 +279,7 @@ gh api repos/my-org/alert-dismissal-automation/dispatches \
 {
   "event_type": "alert-dismissal-requested",
   "client_payload": {
-    "schema_version": 2,
+    "schema_version": 1,
     "target": {
       "organization": "my-org",
       "repository": "my-org/service-repo",
