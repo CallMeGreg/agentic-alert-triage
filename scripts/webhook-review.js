@@ -13,6 +13,7 @@ const {
   normalizeTeamLogins,
   redactSensitiveText,
   splitRepository,
+  validateEnterpriseApp,
 } = require('./agentic-review');
 const {
   formatDenialMessage,
@@ -27,6 +28,7 @@ const MAX_DELIVERY_ID_LENGTH = 128;
 const DEFAULT_CACHE_SETTINGS = {
   teamMembersTtlSeconds: 300,
   controlInstallationTtlSeconds: 600,
+  appIdentityTtlSeconds: 600,
   deliveryDedupeTtlSeconds: 900,
   deliveryDedupeMaxEntries: 1000,
 };
@@ -156,6 +158,13 @@ function getBoundedConfigNumber(
 function getCacheSettings(config) {
   const cache = config.cache || {};
   return {
+    appIdentityTtlSeconds: getBoundedConfigNumber(
+      cache.app_identity_ttl_seconds,
+      DEFAULT_CACHE_SETTINGS.appIdentityTtlSeconds,
+      'cache.app_identity_ttl_seconds',
+      1,
+      3600
+    ),
     teamMembersTtlSeconds: getBoundedConfigNumber(
       cache.team_members_ttl_seconds,
       DEFAULT_CACHE_SETTINGS.teamMembersTtlSeconds,
@@ -526,13 +535,17 @@ function createWebhookReviewHandler(options) {
   const {
     app,
     config = loadConfig(),
-    env = process.env,
     now = Date.now,
   } = options;
-  const settings = getAgenticSettings(config, env);
+  const settings = getAgenticSettings(config);
   const enabledAlertTypes = getEnabledAlertTypes(config);
   const deterministicRules = getDeterministicRules(config);
   const cacheSettings = getCacheSettings(config);
+  const appIdentityCache = new BoundedTtlCache({
+    ttlMs: cacheSettings.appIdentityTtlSeconds * 1000,
+    maxEntries: 1,
+    now,
+  });
   const teamCache =
     options.teamCache ||
     new BoundedTtlCache({
@@ -622,6 +635,19 @@ function createWebhookReviewHandler(options) {
     }
 
     const event = validateWebhookContext(context, eventName, settings);
+    if (settings.enterprise) {
+      // GitHub restricts enterprise-owned App installations to that enterprise.
+      await appIdentityCache.getOrLoad(
+        settings.enterprise.toLowerCase(),
+        async () => {
+          const appOctokit = await app.auth();
+          const { data } = await appOctokit.request('GET /app', {
+            headers: { 'X-GitHub-Api-Version': API_VERSION },
+          });
+          validateEnterpriseApp(data, settings.enterprise);
+        }
+      );
+    }
     let commentValidation = { valid: true };
     if (settings.reviewMode !== 'agentic') {
       commentValidation = validateDismissalComment(
@@ -715,6 +741,7 @@ function createWebhookReviewHandler(options) {
             await getDispatchDependencies();
           const payload = buildDispatchPayload({
             organization: event.organization,
+            enterprise: settings.enterprise,
             sourceRepository: settings.workflowRepository,
             repository: event.repository,
             repositoryId: event.repositoryId,

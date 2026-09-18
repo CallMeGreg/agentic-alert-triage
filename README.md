@@ -15,8 +15,14 @@ The agent never approves a dismissal request. A request judged ready remains
 open and the alert is assigned to the configured AppSec team for final human
 review.
 
+One enterprise-owned App can serve every organization where it is installed,
+with all agentic runs executing in one central workflow repository. Set
+`enterprise` to the enterprise's URL slug; new organization installations need
+no organization allowlist or per-organization workflow copy. Existing
+single-organization deployments can continue using `organization` instead.
+
 > [!NOTE]
-> Delegated alert dismissal must be enabled in the monitored organization.
+> Delegated alert dismissal must be enabled in each monitored organization.
 > Delegated alert dismissal for secret scanning is currently
 > [public preview](https://docs.github.com/en/code-security/how-tos/manage-security-alerts/remediate-alerts-at-scale/review-alert-dismissal-requests)
 > and is subject to change.
@@ -42,7 +48,9 @@ For each signed delivery, the handler:
 
 1. Validates the event/action, organization, repository and installation IDs,
    dismissal request IDs, repository ID, requester, request data type, and up
-   to 100 positive unique alert numbers.
+   to 100 positive unique alert numbers. In enterprise mode, also verifies with
+   App-authenticated `GET /app` that the App is owned by the configured
+   enterprise before any denial, team lookup, or dispatch.
 2. Ignores opaque `metadata`, `responses`, and unknown request-data fields.
 3. Applies deterministic checks with the incoming installation Octokit when
    configured.
@@ -66,7 +74,8 @@ characters. It contains only:
   request data type, selected dismissal reasons, dates, and URL;
 - a sanitized, sorted AppSec membership snapshot;
 - bounded provenance: control repository, webhook event, incoming installation
-  ID, and delivery ID when available.
+  ID, delivery ID when available, and the verified enterprise slug in enterprise
+  mode (`source.enterprise`, an additive schema-v1 field).
 
 Token-shaped values and private keys are redacted from requester text. Alert
 content, secret values, opaque webhook fields, and agent instructions are not
@@ -78,11 +87,14 @@ is generated from
 [`agentic-dismissal-review.md`](.github/workflows/agentic-dismissal-review.md).
 It:
 
-1. Validates the App-authenticated dispatch sender, target, schema, request
-   snapshot, source event, installation metadata, alert type, and team snapshot
-   against trusted `config.yml`.
-2. Mints a fresh installation token for the monitored organization using the
-   same GitHub App.
+1. Authenticates as the App with `GET /app`, verifies its enterprise ownership
+   when configured, and validates the dispatch sender against the returned App
+   identity. Validates the target, schema, request snapshot, source event,
+   enterprise provenance, installation metadata, alert type, and team snapshot
+   against trusted `config.yml` before exporting a token owner.
+2. Mints a fresh installation token for the validated **target organization**,
+   not the control repository owner. Checks that its installation ID matches
+   the signed webhook's source installation ID before using it.
 3. Fetches only the current alert and up to five same-organization linked
    issues with at most 20 comments each. It does not fetch current request
    state.
@@ -93,8 +105,9 @@ It:
 6. Gives the model read-only local context, bounded shell access, no GitHub MCP,
    no edit/commit/PR output, and one custom SafeOutput:
    `apply_dismissal_decision`.
-7. Runs gh-aw threat detection before a fresh-checkout SafeOutput job applies
-   the decision with a new App installation token.
+7. Runs gh-aw threat detection before a fresh-checkout SafeOutput job repeats
+   the App/dispatch validation and applies the decision with a new token for
+   that same target installation.
 
 Concurrency is grouped per repository, alert type, and alert number with
 `cancel-in-progress: true`. Denials are optimistic writes: known stale responses
@@ -118,7 +131,7 @@ which provides repository read access and permission to manage security alerts.
 Use one GitHub App registration, but install it in both security and control
 planes:
 
-1. **Monitored organization/repositories:** receives dismissal-request
+1. **Every monitored organization/repositories:** receives dismissal-request
    webhooks, performs deterministic denials, reads AppSec membership, and
    allows the agentic workflow to read and assign alerts.
 2. **Control repository owner/repository:** includes the repository configured
@@ -135,6 +148,51 @@ through Probot, and calls
 The control-repository installation requires **Contents: write**. The same App
 permission set applies across installations, so use selected-repository
 installations where tighter repository scope is required.
+
+### Automatic enterprise-wide organization onboarding
+
+1. Register the App **under the enterprise**, or
+   [transfer the existing private App to it](https://docs.github.com/en/apps/maintaining-github-apps/transferring-ownership-of-a-github-app).
+   An enterprise-owned App has internal visibility and GitHub restricts its
+   installations to the enterprise and its organizations. An organization-owned
+   private App (`public: false` in `app.yml`) cannot be installed across other
+   organizations just because they share an enterprise. Making it public does
+   not establish enterprise ownership and is not sufficient for this mode.
+2. Place the central workflow repository in an organization **inside the same
+   enterprise**. Set `agentic.workflow_repository` to that repository and
+   install the App there. The sample `CallMeGreg/agentic-alert-triage` default
+   must be replaced for an enterprise deployment; enterprise-owned Apps cannot
+   be installed on personal accounts.
+3. Install the same App on each monitored organization and the repositories to
+   be reviewed. Include any repositories used for linked issue evidence.
+   Enable delegated dismissal in each organization and create a nonempty
+   `appsec-team` (or the configured slug) with that organization's Security
+   Manager role. Team members may differ between organizations.
+4. Replace `organization` with `enterprise: your-enterprise` in the service and
+   central repository configuration. Replace the sample single-org
+   `required_pattern` with your shared policy. Keep the trust scope, policy, team slug,
+   and workflow repository consistent between both copies; restart Probot
+   after changing its local configuration.
+5. Store the same App's credentials in the service and central repository
+   Actions secrets. Deploy the compiled workflow on the central repository's
+   default branch. No workflow files or Actions secrets are needed in monitored
+   repositories.
+
+After setup, another organization in the enterprise only needs the installation,
+delegated dismissal, and local AppSec team; it does not need a config entry.
+Installing an App on the enterprise account itself is **not** a substitute for
+organization/repository installations. This application does not require
+enterprise-level API permissions or an enterprise installation token.
+
+The trust boundary is GitHub's restriction on **enterprise-owned App
+installations**, verified via the enterprise owner returned by authenticated
+`GET /app`. It does not trust an enterprise name supplied in request comments,
+opaque webhook fields, or a human-created repository dispatch. App ownership
+lookups are cached briefly in Probot and performed afresh in each workflow
+phase; failures do not fall back to accepting arbitrary organizations.
+
+See GitHub's
+[enterprise App setup and installation guidance](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-github-apps-for-your-enterprise/creating-github-apps-for-your-enterprise).
 
 ## GitHub App permissions
 
@@ -176,10 +234,10 @@ GitHub documents the permission required by each endpoint in
 [`config.yml`](config.yml) is loaded once when the Probot process starts:
 
 ```yaml
-organization: callmegreg-demo-org
+enterprise: your-enterprise
 review_mode: both
 
-required_pattern: "https://github\\.com/callmegreg-demo-org/[a-zA-Z0-9._-]+/issues/\\d+"
+required_pattern: "https://github\\.com/[a-zA-Z0-9-]+/[a-zA-Z0-9._-]+/issues/\\d+"
 minimum_length: 20
 case_sensitive: false
 
@@ -189,22 +247,37 @@ alert_types:
   - secret_scanning
 
 agentic:
-  workflow_repository: CallMeGreg/agentic-alert-triage
+  workflow_repository: your-security-org/alert-triage
   appsec_team_slug: appsec-team
   staged: true
 
 cache:
+  app_identity_ttl_seconds: 600
   team_members_ttl_seconds: 300
   control_installation_ttl_seconds: 600
   delivery_dedupe_ttl_seconds: 900
   delivery_dedupe_max_entries: 1000
 ```
 
+For single-organization operation, replace `enterprise` with
+`organization: your-org`. Do not configure both. The control repository owner
+is never inferred as the monitored organization from `GITHUB_REPOSITORY`;
+agentic modes require an explicit trust scope.
+
+Policies and the AppSec team slug are shared across installations. Each
+organization's own team membership is used, and default help contacts resolve
+to `@<target-organization>/<appsec_team_slug>`. An explicit `help_contact` may
+point to a shared enterprise help desk. Avoid hard-coded organization names in
+shared regexes and denial templates. The example regex checks issue URL format
+only; the agentic workflow fetches evidence from the target organization only,
+not from other organizations in the same enterprise.
+
 ### Configuration reference
 
 | Key | Default | Description |
 |---|---|---|
-| `organization` | webhook organization in deterministic mode; required trusted value for agentic use | Only this organization's events and workflow targets are accepted |
+| `enterprise` | none | Enterprise URL slug; automatically accepts organization installations of an App owned by this enterprise; mutually exclusive with `organization` |
+| `organization` | webhook organization in deterministic mode when neither scope is set | Legacy single-org scope; agentic modes require this or `enterprise` explicitly |
 | `review_mode` | `deterministic` | `deterministic`, `agentic`, or `both` |
 | `required_phrase` | none | Phrase required in the requester comment |
 | `required_pattern` | none | JavaScript regular expression required in the requester comment |
@@ -212,11 +285,12 @@ cache:
 | `case_sensitive` | `false` | Case-sensitive phrase and regex matching |
 | `alert_types` | all three | Enabled alert categories; subscribed disabled types are ignored |
 | `agentic.workflow_repository` | `CallMeGreg/agentic-alert-triage` | Central repository receiving schema-v1 dispatches |
-| `agentic.appsec_team_slug` | `appsec-team` | Security Manager team used for ready-alert assignment |
+| `agentic.appsec_team_slug` | `appsec-team` | Security Manager team in each target organization used for ready-alert assignment |
 | `agentic.staged` | `true` | Preview SafeOutput writes |
 | `agentic.help_contact` | `@org/team` | Contact included in agentic denials |
 | `agentic.denial_message` | built-in | Optional agentic denial template |
 | `denial_message` | built-in | Optional deterministic denial template |
+| `cache.app_identity_ttl_seconds` | `600` | Verified enterprise App ownership cache TTL, 1-3600 seconds |
 | `cache.team_members_ttl_seconds` | `300` | Process-local team cache TTL, 1-3600 seconds |
 | `cache.control_installation_ttl_seconds` | `600` | Process-local control installation cache TTL, 1-3600 seconds |
 | `cache.delivery_dedupe_ttl_seconds` | `900` | Successful delivery-operation dedupe TTL, 1-3600 seconds |
@@ -303,9 +377,12 @@ The control repository needs these Actions secrets:
 | `ALERT_DISMISSAL_APP_CLIENT_ID` | Client ID for the same GitHub App used by Probot |
 | `ALERT_DISMISSAL_APP_PRIVATE_KEY` | Full private key PEM for that App |
 
-The App must be installed on the configured monitored organization so
+The App must be installed on each monitored organization so
 `actions/create-github-app-token` can mint the alert/evidence and decision
-tokens. The model never receives the App private key or installation token.
+tokens. Both workflow phases authenticate the App before selecting the target
+organization; `export-workflow-config.js` requires the App client ID and private
+key in its step environment. The model never receives the App private key or
+installation token.
 Copilot inference uses `copilot-requests: write` on the workflow's built-in
 Actions token.
 
@@ -328,7 +405,10 @@ GitHub webhook delivery is at-least-once.
   during its TTL. Failed operations are removed so a GitHub retry can run.
 - Team membership and control-installation resolution are cached for short
   configurable TTLs, avoiding one Members API call and one App installation
-  lookup per event.
+  lookup per event. Team entries are scoped by organization/team, delivery
+  entries include the full repository name, and the single control-installation
+  entry is shared across organizations. Enterprise App ownership is cached
+  separately with `cache.app_identity_ttl_seconds`.
 - Caches do not survive restarts and are not shared by replicas. They are an
   efficiency layer, not the durable correctness mechanism.
 - Across restarts or replicas, duplicate agentic dispatches converge through
@@ -362,7 +442,10 @@ validation, multi-alert deduplication, disabled alert types, request
 snapshotting and redaction, team and control-installation caches, separate
 control dispatch authentication, deterministic/agentic/both behavior,
 duplicate deliveries, retries, stale writes, secret hiding, assignment, and
-failure propagation.
+failure propagation. Enterprise coverage includes two organizations with
+identical repository names and alert numbers, isolated membership/delivery
+caches, enterprise App ownership failures and expiry, token-owner export
+validation, and installation-ID mismatches.
 
 ## Repository structure
 

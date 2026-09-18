@@ -2,12 +2,17 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const yaml = require('js-yaml');
 const {
   assignAlertToTeam,
   buildDispatchPayload,
   buildReviewContext,
   DEFAULT_WORKFLOW_REPOSITORY,
   extractIssueReferences,
+  formatAgenticDenialMessage,
   getAgenticSettings,
   getAlert,
   isAssignedToTeam,
@@ -17,7 +22,9 @@ const {
   sanitizeAgentReason,
   selectSecretScanningAssignee,
   validateDispatchEvent,
+  validateEnterpriseApp,
 } = require('./agentic-review');
+const { main: exportWorkflowConfig, resolveWorkflowTarget } = require('./export-workflow-config');
 
 const WORKFLOW_REPOSITORY = 'CallMeGreg/agentic-alert-triage';
 
@@ -82,6 +89,20 @@ function validationEnv() {
   };
 }
 
+function enterpriseConfig() {
+  const config = agenticConfig();
+  delete config.organization;
+  return { ...config, enterprise: 'octo-enterprise' };
+}
+
+function enterpriseDispatchEvent(organization = 'octo-org') {
+  const event = createDispatchEvent();
+  event.client_payload.target.organization = organization;
+  event.client_payload.target.repository = `${organization}/service`;
+  event.client_payload.source.enterprise = 'octo-enterprise';
+  return event;
+}
+
 describe('agentic configuration', () => {
   it('defaults to deterministic review and the central workflow repository', () => {
     const settings = getAgenticSettings({}, {});
@@ -98,6 +119,44 @@ describe('agentic configuration', () => {
       () => getAgenticSettings({ review_mode: 'agentic' }, {}),
       /requires organization/
     );
+  });
+
+  it('supports enterprise scope without inferring the control repository owner', () => {
+    const settings = getAgenticSettings(enterpriseConfig(), validationEnv());
+    assert.equal(settings.enterprise, 'octo-enterprise');
+    assert.equal(settings.organization, null);
+    assert.throws(
+      () => getAgenticSettings({ review_mode: 'agentic' }, validationEnv()),
+      /requires organization or enterprise/
+    );
+  });
+
+  it('rejects ambiguous and malformed enterprise configuration', () => {
+    assert.throws(
+      () => getAgenticSettings({ ...agenticConfig(), enterprise: 'octo-enterprise' }),
+      /either enterprise or organization/
+    );
+    for (const enterprise of ['', null, 42, [], {}, '../acme', 'acme\nowner=attacker']) {
+      assert.throws(
+        () => getAgenticSettings({ ...enterpriseConfig(), enterprise }),
+        /Invalid GitHub enterprise slug/
+      );
+    }
+  });
+
+  it('requires the App to be owned by the configured enterprise, not a same-named org', () => {
+    validateEnterpriseApp({ owner: { slug: 'OCTO-ENTERPRISE' } }, 'octo-enterprise');
+    for (const owner of [
+      null,
+      { slug: 'other-enterprise' },
+      { login: 'octo-enterprise', type: 'Organization' },
+      { login: 'octo-enterprise', slug: 'octo-enterprise' },
+    ]) {
+      assert.throws(
+        () => validateEnterpriseApp({ owner }, 'octo-enterprise'),
+        /requires a GitHub App owned by enterprise/
+      );
+    }
   });
 
   it('allows the control repository to use a different owner', () => {
@@ -143,6 +202,66 @@ describe('agentic configuration', () => {
 });
 
 describe('dispatch payloads', () => {
+  it('validates multiple target organizations and derives organization-local help contacts', () => {
+    for (const organization of ['octo-org', 'second-org']) {
+      const target = validateDispatchEvent(
+        enterpriseDispatchEvent(organization),
+        enterpriseConfig(),
+        { ...validationEnv(), EXPECTED_INSTALLATION_ID: '44' }
+      );
+      assert.equal(target.organization, organization);
+      assert.equal(target.owner, organization);
+      assert.equal(target.helpContact, `@${organization}/appsec-team`);
+      const message = formatAgenticDenialMessage({
+        config: enterpriseConfig(),
+        target,
+        dismissalRequest: target.dismissalRequest,
+        reason: 'Provide supporting evidence.',
+      });
+      assert.match(message, new RegExp(`@${organization}/appsec-team`));
+    }
+  });
+
+  it('preserves an explicit shared help contact in enterprise mode', () => {
+    const config = enterpriseConfig();
+    config.agentic.help_contact = 'Contact the enterprise security desk.';
+    const target = validateDispatchEvent(enterpriseDispatchEvent(), config, validationEnv());
+    assert.equal(target.helpContact, config.agentic.help_contact);
+  });
+
+  it('rejects missing or mismatched enterprise provenance and cross-org repositories', () => {
+    for (const enterprise of [undefined, '', 'other-enterprise', {}, 1]) {
+      const event = enterpriseDispatchEvent();
+      event.client_payload.source.enterprise = enterprise;
+      assert.throws(
+        () => validateDispatchEvent(event, enterpriseConfig(), validationEnv()),
+        /source enterprise does not match/
+      );
+    }
+    const event = enterpriseDispatchEvent();
+    event.client_payload.target.repository = 'second-org/service';
+    assert.throws(
+      () => validateDispatchEvent(event, enterpriseConfig(), validationEnv()),
+      /outside target organization/
+    );
+  });
+
+  it('requires the App sender and rejects a token from another installation', () => {
+    assert.throws(
+      () => validateDispatchEvent(enterpriseDispatchEvent(), enterpriseConfig(), {}),
+      /EXPECTED_DISPATCH_SENDER is required/
+    );
+    for (const installationId of ['45', '9001', 'invalid']) {
+      assert.throws(
+        () => validateDispatchEvent(enterpriseDispatchEvent(), enterpriseConfig(), {
+          ...validationEnv(),
+          EXPECTED_INSTALLATION_ID: installationId,
+        }),
+        /installation/
+      );
+    }
+  });
+
   it('contains a sanitized request, source provenance, and team snapshot', () => {
     const payload = buildDispatchPayload({
       organization: 'octo-org',
@@ -282,7 +401,7 @@ describe('dispatch payloads', () => {
     assert.throws(
       () =>
         validateDispatchEvent(event, agenticConfig(), validationEnv()),
-      /outside configured organization/
+      /outside target organization/
     );
   });
 
@@ -348,6 +467,128 @@ describe('dispatch payloads', () => {
         ),
       /not enabled/
     );
+  });
+});
+
+describe('workflow target export before installation token creation', () => {
+  function appClient(owner = { slug: 'octo-enterprise' }) {
+    return {
+      request: async (route) => {
+        assert.equal(route, 'GET /app');
+        return { data: { slug: 'alert-dismissal-bot', owner } };
+      },
+    };
+  }
+
+  it('authenticates and exports each target org, never the control owner', async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-config-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    for (const organization of ['octo-org', 'second-org']) {
+      const outputPath = path.join(directory, organization);
+      await exportWorkflowConfig({
+        config: enterpriseConfig(),
+        event: enterpriseDispatchEvent(organization),
+        appOctokit: appClient(),
+        env: { ...validationEnv(), GITHUB_OUTPUT: outputPath },
+      });
+      assert.equal(fs.readFileSync(outputPath, 'utf8'), `organization=${organization}\n`);
+    }
+  });
+
+  it('writes no token-owner output for an untrusted sender, App, or dispatch', async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-config-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const outputPath = path.join(directory, 'output');
+    const wrongSender = enterpriseDispatchEvent();
+    wrongSender.sender.login = 'octocat';
+    const wrongSource = enterpriseDispatchEvent();
+    wrongSource.client_payload.source.repository = 'attacker/control';
+    const badOrganization = enterpriseDispatchEvent('octo-org\nowner=attacker');
+    const missingEnterprise = createDispatchEvent();
+    const wrongSchema = enterpriseDispatchEvent();
+    wrongSchema.client_payload.schema_version = 99;
+    for (const event of [wrongSender, wrongSource, badOrganization, missingEnterprise, wrongSchema]) {
+      await assert.rejects(exportWorkflowConfig({
+        config: enterpriseConfig(),
+        event,
+        appOctokit: appClient(),
+        env: { ...validationEnv(), GITHUB_OUTPUT: outputPath },
+      }));
+      assert.equal(fs.existsSync(outputPath), false);
+    }
+    for (const owner of [{ slug: 'other-enterprise' }, { login: 'octo-org' }]) {
+      await assert.rejects(exportWorkflowConfig({
+        config: enterpriseConfig(),
+        event: enterpriseDispatchEvent(),
+        appOctokit: appClient(owner),
+        env: { ...validationEnv(), GITHUB_OUTPUT: outputPath },
+      }), /requires a GitHub App owned by enterprise/);
+      assert.equal(fs.existsSync(outputPath), false);
+    }
+  });
+
+  it('retains explicit single-organization support for organization-owned Apps', async () => {
+    const target = await resolveWorkflowTarget({
+      config: agenticConfig(),
+      event: createDispatchEvent(),
+      appOctokit: appClient({ login: 'octo-org', type: 'Organization' }),
+      env: validationEnv(),
+    });
+    assert.equal(target.organization, 'octo-org');
+    assert.equal(target.enterprise, null);
+  });
+
+  it('surfaces App authentication failures without exporting a target', async () => {
+    await assert.rejects(resolveWorkflowTarget({
+      config: enterpriseConfig(),
+      event: enterpriseDispatchEvent(),
+      appOctokit: { request: async () => { throw new Error('App authentication failed'); } },
+      env: validationEnv(),
+    }), /App authentication failed/);
+  });
+
+  it('validates both workflow phases before minting organization tokens', () => {
+    const source = fs.readFileSync(path.join(
+      __dirname, '../.github/workflows/agentic-dismissal-review.md'
+    ), 'utf8');
+    const workflow = yaml.load(source.split('---')[1]);
+    const phases = [
+      { steps: workflow['pre-agent-steps'], tokenId: 'review-token', script: 'prepare-agentic-review' },
+      {
+        steps: workflow['safe-outputs'].jobs['apply-dismissal-decision'].steps,
+        tokenId: 'decision-token',
+        script: 'apply-agentic-decision',
+      },
+    ];
+    for (const { steps, tokenId, script } of phases) {
+      const validationIndex = steps.findIndex((step) => step.id === 'trusted-config');
+      const tokenIndex = steps.findIndex((step) => step.id === tokenId);
+      const consumerIndex = steps.findIndex((step) => step.run === `node scripts/${script}.js`);
+      assert.ok(validationIndex >= 0 && validationIndex < tokenIndex);
+      assert.ok(tokenIndex < consumerIndex);
+      assert.equal(steps[validationIndex].run, 'node scripts/export-workflow-config.js');
+      assert.equal(
+        steps[validationIndex].env.ALERT_DISMISSAL_APP_PRIVATE_KEY,
+        '${{ secrets.ALERT_DISMISSAL_APP_PRIVATE_KEY }}'
+      );
+      assert.equal(
+        steps[tokenIndex].with.owner,
+        '${{ steps.trusted-config.outputs.organization }}'
+      );
+      assert.equal(
+        steps[consumerIndex].env.EXPECTED_INSTALLATION_ID,
+        `\${{ steps.${tokenId}.outputs.installation-id }}`
+      );
+      assert.equal(
+        steps[consumerIndex].env.EXPECTED_DISPATCH_SENDER,
+        `\${{ steps.${tokenId}.outputs.app-slug }}[bot]`
+      );
+    }
+    assert.equal(workflow.tools.github, false);
+    assert.equal(workflow.tools.edit, false);
+    assert.equal(workflow['safe-outputs']['threat-detection'].enabled, true);
+    assert.equal(workflow.concurrency['cancel-in-progress'], true);
+    assert.match(workflow.concurrency.group, /client_payload.target.repository/);
   });
 });
 

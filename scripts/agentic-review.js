@@ -51,25 +51,40 @@ function loadConfig(configPath = process.env.CONFIG_PATH || path.join(process.cw
   return yaml.load(fs.readFileSync(configPath, 'utf8')) || {};
 }
 
-function getOrganization(config, env = process.env) {
-  const organization =
-    config.organization ||
-    (env.GITHUB_REPOSITORY ? env.GITHUB_REPOSITORY.split('/')[0] : null);
-
-  if (!organization) {
-    throw new Error(
-      'Cannot determine organization. Set "organization" in config.yml or GITHUB_REPOSITORY.'
-    );
-  }
-
-  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(organization)) {
+function getOrganization(config) {
+  const organization = config.organization;
+  if (
+    typeof organization !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(organization)
+  ) {
     throw new Error(`Invalid GitHub organization name "${organization}".`);
   }
-
   return organization;
 }
 
-function getAgenticSettings(config, env = process.env) {
+function getEnterpriseSlug(value) {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/.test(value)
+  ) {
+    throw new Error('Invalid GitHub enterprise slug.');
+  }
+  return value;
+}
+
+function validateEnterpriseApp(appInfo, enterprise) {
+  if (
+    typeof appInfo?.owner?.slug !== 'string' ||
+    appInfo.owner.login != null ||
+    appInfo.owner.slug.toLowerCase() !== enterprise.toLowerCase()
+  ) {
+    throw new Error(
+      `Enterprise mode requires a GitHub App owned by enterprise ${enterprise}.`
+    );
+  }
+}
+
+function getAgenticSettings(config) {
   const reviewMode = config.review_mode || 'deterministic';
   if (!['deterministic', 'agentic', 'both'].includes(reviewMode)) {
     throw new Error(
@@ -79,9 +94,12 @@ function getAgenticSettings(config, env = process.env) {
 
   const agentic = config.agentic || {};
   const organization =
-    (config.organization || env.GITHUB_REPOSITORY)
-      ? getOrganization(config, env)
-      : null;
+    config.organization !== undefined ? getOrganization(config) : null;
+  const enterprise =
+    config.enterprise !== undefined ? getEnterpriseSlug(config.enterprise) : null;
+  if (organization && enterprise) {
+    throw new Error('Configure either enterprise or organization, not both.');
+  }
   const teamSlug = agentic.appsec_team_slug || 'appsec-team';
   const workflowRepository =
     agentic.workflow_repository || DEFAULT_WORKFLOW_REPOSITORY;
@@ -92,9 +110,9 @@ function getAgenticSettings(config, env = process.env) {
   splitRepository(workflowRepository);
 
   if (reviewMode === 'agentic' || reviewMode === 'both') {
-    if (!organization) {
+    if (!organization && !enterprise) {
       throw new Error(
-        'Agentic review requires organization or GITHUB_REPOSITORY.'
+        'Agentic review requires organization or enterprise in config.yml.'
       );
     }
   }
@@ -102,6 +120,7 @@ function getAgenticSettings(config, env = process.env) {
   return {
     reviewMode,
     organization,
+    enterprise,
     teamSlug,
     workflowRepository,
     staged: agentic.staged !== false,
@@ -185,6 +204,7 @@ function normalizeDeliveryId(value) {
 
 function buildDispatchPayload({
   organization,
+  enterprise = null,
   sourceRepository,
   repository,
   repositoryId,
@@ -274,6 +294,9 @@ function buildDispatchPayload({
       repository: `${source.owner}/${source.repo}`,
       webhook_event: webhookEvent,
       installation_id: normalizedInstallationId,
+      ...(enterprise !== null
+        ? { enterprise: getEnterpriseSlug(enterprise) }
+        : {}),
     },
     dry_run: dryRun,
   };
@@ -720,7 +743,7 @@ function readDispatchEvent(eventPath = process.env.GITHUB_EVENT_PATH) {
 }
 
 function validateDispatchEvent(event, config, env = process.env) {
-  const settings = getAgenticSettings(config, env);
+  const settings = getAgenticSettings(config);
   if (settings.reviewMode !== 'agentic' && settings.reviewMode !== 'both') {
     throw new Error(
       'Agentic review is disabled. Set review_mode to agentic or both.'
@@ -755,6 +778,7 @@ function validateDispatchEvent(event, config, env = process.env) {
   }
 
   if (
+    settings.organization &&
     dispatchedTarget.organization.toLowerCase() !==
     settings.organization.toLowerCase()
   ) {
@@ -763,8 +787,12 @@ function validateDispatchEvent(event, config, env = process.env) {
     );
   }
 
+  if (!env.EXPECTED_DISPATCH_SENDER) {
+    throw new Error(
+      'EXPECTED_DISPATCH_SENDER is required to validate the GitHub App identity.'
+    );
+  }
   if (
-    env.EXPECTED_DISPATCH_SENDER &&
     event.sender?.login?.toLowerCase() !==
       env.EXPECTED_DISPATCH_SENDER.toLowerCase()
   ) {
@@ -774,9 +802,9 @@ function validateDispatchEvent(event, config, env = process.env) {
   }
 
   const { owner, repo } = splitRepository(dispatchedTarget.repository);
-  if (owner.toLowerCase() !== settings.organization.toLowerCase()) {
+  if (owner.toLowerCase() !== dispatchedTarget.organization.toLowerCase()) {
     throw new Error(
-      `Dispatch target ${dispatchedTarget.repository} is outside configured organization ${settings.organization}.`
+      `Dispatch target ${dispatchedTarget.repository} is outside target organization ${dispatchedTarget.organization}.`
     );
   }
 
@@ -856,6 +884,15 @@ function validateDispatchEvent(event, config, env = process.env) {
 
   const source = payload.source || {};
   if (
+    settings.enterprise &&
+    (typeof source.enterprise !== 'string' ||
+      source.enterprise.toLowerCase() !== settings.enterprise.toLowerCase())
+  ) {
+    throw new Error(
+      'Dispatch source enterprise does not match configured enterprise.'
+    );
+  }
+  if (
     typeof source.repository !== 'string' ||
     source.repository.toLowerCase() !==
       settings.workflowRepository.toLowerCase()
@@ -881,10 +918,25 @@ function validateDispatchEvent(event, config, env = process.env) {
     source.installation_id,
     'source installation ID'
   );
+  if (
+    env.EXPECTED_INSTALLATION_ID &&
+    sourceInstallationId !== normalizePositiveInteger(
+      env.EXPECTED_INSTALLATION_ID,
+      'workflow installation ID'
+    )
+  ) {
+    throw new Error(
+      'Workflow token installation does not match the webhook installation.'
+    );
+  }
   const deliveryId = normalizeDeliveryId(source.delivery_id);
 
   return {
     ...settings,
+    organization: dispatchedTarget.organization,
+    helpContact:
+      config.agentic?.help_contact ||
+      `@${dispatchedTarget.organization}/${settings.teamSlug}`,
     payload,
     owner,
     repo,
@@ -1091,4 +1143,5 @@ module.exports = {
   splitRepository,
   isStaleDismissalReviewError,
   validateDispatchEvent,
+  validateEnterpriseApp,
 };

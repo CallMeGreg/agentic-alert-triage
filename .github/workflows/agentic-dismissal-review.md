@@ -39,8 +39,11 @@ steps:
     run: npm ci --ignore-scripts --no-audit --no-fund
 
 pre-agent-steps:
-  - name: Resolve trusted workflow configuration
+  - name: Authenticate App and validate dispatch target
     id: trusted-config
+    env:
+      ALERT_DISMISSAL_APP_CLIENT_ID: ${{ secrets.ALERT_DISMISSAL_APP_CLIENT_ID }}
+      ALERT_DISMISSAL_APP_PRIVATE_KEY: ${{ secrets.ALERT_DISMISSAL_APP_PRIVATE_KEY }}
     run: node scripts/export-workflow-config.js
 
   - name: Generate read-only review token
@@ -54,6 +57,7 @@ pre-agent-steps:
   - name: Fetch alert and sanitize webhook context
     env:
       EXPECTED_DISPATCH_SENDER: ${{ steps.review-token.outputs.app-slug }}[bot]
+      EXPECTED_INSTALLATION_ID: ${{ steps.review-token.outputs.installation-id }}
       GITHUB_TOKEN: ${{ steps.review-token.outputs.token }}
       GH_AW_SAFE_OUTPUTS: ${{ runner.temp }}/gh-aw/safeoutputs/outputs.jsonl
     run: node scripts/prepare-agentic-review.js
@@ -97,8 +101,11 @@ safe-outputs:
         - name: Install dependencies
           run: npm ci --ignore-scripts --no-audit --no-fund
 
-        - name: Resolve trusted workflow configuration
+        - name: Authenticate App and validate dispatch target
           id: trusted-config
+          env:
+            ALERT_DISMISSAL_APP_CLIENT_ID: ${{ secrets.ALERT_DISMISSAL_APP_CLIENT_ID }}
+            ALERT_DISMISSAL_APP_PRIVATE_KEY: ${{ secrets.ALERT_DISMISSAL_APP_PRIVATE_KEY }}
           run: node scripts/export-workflow-config.js
 
         - name: Generate decision token
@@ -112,6 +119,7 @@ safe-outputs:
         - name: Apply bounded dismissal decision
           env:
             EXPECTED_DISPATCH_SENDER: ${{ steps.decision-token.outputs.app-slug }}[bot]
+            EXPECTED_INSTALLATION_ID: ${{ steps.decision-token.outputs.installation-id }}
             GITHUB_TOKEN: ${{ steps.decision-token.outputs.token }}
           run: node scripts/apply-agentic-decision.js
 ---

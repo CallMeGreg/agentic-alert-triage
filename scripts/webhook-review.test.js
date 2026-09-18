@@ -9,6 +9,7 @@ const {
   registerWebhookHandlers,
   validateWebhookContext,
 } = require('./webhook-review');
+const { validateDispatchEvent } = require('./agentic-review');
 
 const WORKFLOW_REPOSITORY = 'CallMeGreg/agentic-alert-triage';
 const EVENT_DEFINITIONS = {
@@ -126,6 +127,9 @@ function createHarness({
   dispatchFailure,
   teamFailure,
   installationFailure,
+  appInfo = { slug: 'alert-dismissal-bot', owner: { slug: 'octo-enterprise' } },
+  appFailure,
+  now,
 } = {}) {
   const calls = {
     appAuth: [],
@@ -140,7 +144,7 @@ function createHarness({
     paginate: async (endpoint, parameters) => {
       calls.teamLookups.push({ endpoint, parameters });
       if (teamFailure) throw teamFailure;
-      return teamMembers;
+      return typeof teamMembers === 'function' ? teamMembers(parameters) : teamMembers;
     },
     request: async (endpoint, parameters) => {
       calls.incomingRequests.push({ endpoint, parameters });
@@ -150,6 +154,10 @@ function createHarness({
   const appOctokit = {
     request: async (endpoint, parameters) => {
       calls.appRequests.push({ endpoint, parameters });
+      if (endpoint === 'GET /app') {
+        if (appFailure) throw appFailure;
+        return { data: appInfo };
+      }
       if (installationFailure) throw installationFailure;
       return { data: { id: 9001 } };
     },
@@ -181,6 +189,7 @@ function createHarness({
     app,
     config,
     env: {},
+    now,
   });
 
   return {
@@ -191,6 +200,144 @@ function createHarness({
     incomingOctokit,
   };
 }
+
+describe('enterprise installation routing', () => {
+  function enterpriseConfig(overrides = {}) {
+    const config = createConfig({ enterprise: 'octo-enterprise', ...overrides });
+    delete config.organization;
+    return config;
+  }
+
+  function organizationContext(organization, installationId, octokit, alertType = 'code_scanning') {
+    const repositoryId = installationId + 100;
+    return createContext({
+      alertType,
+      octokit,
+      payload: createPayload(alertType, {
+        requestOverrides: { repository_id: repositoryId },
+        payloadOverrides: {
+          organization: { login: organization },
+          repository: { id: repositoryId, full_name: `${organization}/service` },
+          installation: { id: installationId },
+        },
+      }),
+    });
+  }
+
+  it('routes every installed org to one control repo without sharing team or delivery caches', async () => {
+    const config = enterpriseConfig();
+    const harness = createHarness({
+      config,
+      teamMembers: ({ org }) => [{ login: `${org}-security` }],
+    });
+    for (const alertType of Object.keys(EVENT_DEFINITIONS)) {
+      const contexts = [
+        organizationContext('first-org', 44, harness.incomingOctokit, alertType),
+        organizationContext('second-org', 45, harness.incomingOctokit, alertType),
+      ];
+      const results = await Promise.all(contexts.map((context) => harness.handler(context)));
+      assert.deepEqual(results.map((result) => result.duplicateCount), [0, 0]);
+      const retries = await Promise.all(contexts.map((context) => harness.handler(context)));
+      assert.deepEqual(retries.map((result) => result.duplicateCount), [1, 1]);
+    }
+    assert.equal(harness.calls.controlRequests.length, 6);
+    assert.equal(harness.calls.teamLookups.length, 2);
+    assert.equal(
+      harness.calls.appRequests.filter(({ endpoint }) => endpoint === 'GET /app').length,
+      1
+    );
+    assert.equal(
+      harness.calls.appRequests.filter(({ endpoint }) => endpoint.includes('/installation')).length,
+      1
+    );
+    assert.equal(harness.calls.incomingRequests.length, 0);
+    for (const { parameters } of harness.calls.controlRequests) {
+      assert.equal(`${parameters.owner}/${parameters.repo}`, WORKFLOW_REPOSITORY);
+      const payload = parameters.client_payload;
+      const org = payload.target.organization;
+      assert.equal(payload.source.enterprise, 'octo-enterprise');
+      assert.deepEqual(payload.review.appsec_team_members, [`${org}-security`]);
+      const target = validateDispatchEvent({
+        action: 'alert-dismissal-requested',
+        repository: { full_name: WORKFLOW_REPOSITORY },
+        sender: { login: 'alert-dismissal-bot[bot]' },
+        client_payload: payload,
+      }, config, {
+        GITHUB_REPOSITORY: WORKFLOW_REPOSITORY,
+        EXPECTED_DISPATCH_SENDER: 'alert-dismissal-bot[bot]',
+        EXPECTED_INSTALLATION_ID: org === 'first-org' ? '44' : '45',
+      });
+      assert.equal(target.organization, org);
+      assert.equal(target.repositoryId, org === 'first-org' ? 144 : 145);
+    }
+  });
+
+  it('rejects wrong-enterprise and organization-owned Apps before any denial or dispatch', async () => {
+    for (const reviewMode of ['deterministic', 'agentic', 'both']) {
+      for (const owner of [{ slug: 'other-enterprise' }, { login: 'octo-enterprise', type: 'Organization' }]) {
+        const harness = createHarness({
+          config: enterpriseConfig({ review_mode: reviewMode, required_phrase: 'missing phrase' }),
+          appInfo: { owner },
+        });
+        const context = organizationContext('first-org', 44, harness.incomingOctokit);
+        // A claimed enterprise cannot replace App-authenticated ownership.
+        context.payload.enterprise = { slug: 'octo-enterprise' };
+        await assert.rejects(harness.handler(context), /requires a GitHub App owned by enterprise/);
+        assert.equal(harness.calls.incomingRequests.length, 0);
+        assert.equal(harness.calls.controlRequests.length, 0);
+        assert.equal(harness.calls.teamLookups.length, 0);
+      }
+    }
+  });
+
+  it('refreshes cached enterprise identity and retries failures', async () => {
+    let now = 0;
+    const appInfo = { owner: { slug: 'octo-enterprise' } };
+    const harness = createHarness({
+      config: enterpriseConfig({ review_mode: 'deterministic', cache: { app_identity_ttl_seconds: 1 } }),
+      appInfo,
+      now: () => now,
+    });
+    const context = organizationContext('first-org', 44, harness.incomingOctokit);
+    await harness.handler(context);
+    now = 1001;
+    appInfo.owner.slug = 'other-enterprise';
+    await assert.rejects(harness.handler(context), /requires a GitHub App owned by enterprise/);
+    appInfo.owner.slug = 'octo-enterprise';
+    await harness.handler(context);
+    assert.equal(harness.calls.appRequests.length, 3);
+  });
+
+  it('surfaces enterprise identity API errors and does not fall back to payload data', async () => {
+    const harness = createHarness({
+      config: enterpriseConfig(),
+      appFailure: new Error('App identity unavailable'),
+    });
+    await assert.rejects(
+      harness.handler(organizationContext('first-org', 44, harness.incomingOctokit)),
+      /App identity unavailable/
+    );
+    assert.equal(harness.calls.controlRequests.length, 0);
+    assert.equal(harness.calls.teamLookups.length, 0);
+  });
+
+  it('keeps deterministic denials on each incoming organization installation', async () => {
+    const harness = createHarness({
+      config: enterpriseConfig({ review_mode: 'deterministic', required_phrase: 'missing phrase' }),
+    });
+    for (const [org, installationId] of [['first-org', 44], ['second-org', 45]]) {
+      const octokit = {
+        request: async (endpoint, parameters) => {
+          assert.match(endpoint, /dismissal-requests/);
+          assert.equal(parameters.owner, org);
+        },
+      };
+      const result = await harness.handler(organizationContext(org, installationId, octokit));
+      assert.equal(result.action, 'denied');
+    }
+    assert.equal(harness.calls.controlRequests.length, 0);
+  });
+});
 
 describe('webhook registration and validation', () => {
   it('registers only the three official created webhook actions', () => {

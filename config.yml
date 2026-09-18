@@ -1,8 +1,12 @@
 # Alert dismissal triage configuration
 
-# Trusted organization whose signed dismissal-request webhooks are accepted.
-# Set this explicitly when the control repository has a different owner.
+# Choose ONE trust scope. Existing single-organization deployments use:
 organization: callmegreg-demo-org
+# To accept every organization installation of an enterprise-owned App,
+# remove organization above and set the enterprise's URL slug instead:
+# enterprise: your-enterprise
+# No organization allowlist is needed. The App must be owned by this
+# enterprise, and the central workflow repo must be in one of its orgs.
 
 # deterministic: deny comments that fail the configured criteria.
 # agentic: dispatch every created request to the gh-aw workflow.
@@ -12,6 +16,10 @@ review_mode: deterministic
 # Optional deterministic criteria. If all are omitted, every comment passes.
 # required_phrase: "mitigating control"
 required_pattern: "https://github\\.com/callmegreg-demo-org/[a-zA-Z0-9._-]+/issues/\\d+"
+# For enterprise mode, replace the single-org example above with your shared
+# policy. This alternative checks URL format only; agentic evidence remains
+# restricted to the target organization:
+# required_pattern: "https://github\\.com/[a-zA-Z0-9-]+/[a-zA-Z0-9._-]+/issues/\\d+"
 # minimum_length: 20
 case_sensitive: false
 
@@ -26,9 +34,11 @@ agentic:
   # Central repository containing the compiled agentic workflow. The GitHub
   # App must also be installed on this repository (or its owner) with
   # Contents: write so it can create repository_dispatch events.
+  # In enterprise mode, replace this with a repository in your enterprise.
   workflow_repository: CallMeGreg/agentic-alert-triage
 
-  # This team is assumed to hold GitHub's organization Security Manager role.
+  # A team with this slug must exist in EACH monitored organization and hold
+  # that organization's Security Manager role. Membership is resolved locally.
   appsec_team_slug: appsec-team
 
   # Preview SafeOutput decisions until the workflow has been evaluated.
@@ -47,6 +57,7 @@ agentic:
 # Short-lived, bounded process-local caches reduce duplicate webhook work and
 # GitHub API calls. They are not a durable queue or cross-replica lock.
 cache:
+  app_identity_ttl_seconds: 600
   team_members_ttl_seconds: 300
   control_installation_ttl_seconds: 600
   delivery_dedupe_ttl_seconds: 900
@@ -59,4 +70,4 @@ denial_message: |
   Alert Dismissal Request Denied
   Your request to dismiss this alert has been automatically denied.
   Reason: {denial_reason}
-  Please create an issue using the following template and add the link to the dismissal request message: https://github.com/callmegreg-demo-org/app-xyz-repo/issues/new?template=foo.yml
+  Please create a supporting issue and add its link to the dismissal request message: https://github.com/{repo_full_name}/issues/new
