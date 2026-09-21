@@ -19,20 +19,9 @@ review, or both.
 
    ![Dismissal request denied with actionable guidance](docs/images/actionable-denial-message.png)
 
-4. With sufficient justification, the agent still never approves the
+4. Even with sufficient justification, the agent **never** approves the
    dismissal: the request remains open and the alert is assigned to AppSec team
    members for human review.
-
-| Mode | Behavior |
-|---|---|
-| `deterministic` | Immediately deny requests whose comments fail configured phrase, pattern, or length checks. Passing requests remain open. |
-| `agentic` | Send every created request to the central gh-aw workflow for contextual review. |
-| `both` | Deny deterministic failures immediately and dispatch passing requests for agentic review. |
-
-> [!IMPORTANT]
-> The agent never approves a dismissal request. A request judged as "ready" remains
-open and the alert is assigned to the configured AppSec team for final human
-review.
 
 ## How it works
 
