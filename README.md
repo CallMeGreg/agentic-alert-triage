@@ -164,7 +164,7 @@ from the validated webhook snapshot, never the control repository owner or
 | `agentic.model` | `auto` | Copilot model used by the agentic workflow |
 | `agentic.appsec_team_slug` | `ent:appsec-team` | Enterprise team with the Security Manager role; `ent:` is required |
 | `agentic.staged` | `true` | Preview SafeOutput writes |
-| `agentic.help_contact` | `Enterprise AppSec team (ent:appsec-team)` | Plain-text contact included in agentic denials |
+| `agentic.help_contact` | `Enterprise AppSec team (ent:appsec-team)` | Value for `{help_contact}` in a custom agentic denial template |
 | `agentic.denial_message` | built-in | Optional agentic denial template |
 | `denial_message` | built-in | Optional deterministic denial template |
 | `cache.app_identity_ttl_seconds` | `600` | App ownership cache TTL, 1-3600 seconds |

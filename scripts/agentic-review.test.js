@@ -288,18 +288,15 @@ describe('dispatch payloads', () => {
       });
       assert.equal(
         message,
-        `DISMISSAL REQUEST DENIED
+        `DISMISSAL REQUEST DENIED.
 
-Review: Agentic
-Requester: octocat
-Status: Not ready for human review
 Reason: Provide supporting evidence.
 
 Next step: Submit a new request with a specific explanation of why the alert can be dismissed, supporting evidence or links, and any relevant mitigating controls or remediation plan.
 
-Help: Enterprise AppSec team (ent:appsec-team)`
+For more help, mention the Enterprise AppSec team in your alert (@/ent:appsec-team)`
       );
-      assert.doesNotMatch(message, /[#*@]/);
+      assert.doesNotMatch(message, /Review:|Requester:|Status:/);
     }
   });
 

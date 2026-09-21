@@ -1079,16 +1079,13 @@ function formatAgenticDenialMessage({
     dismissalRequest.requester?.actor_name || 'requester';
   const template =
     target.denialMessage ||
-    `DISMISSAL REQUEST DENIED
+    `DISMISSAL REQUEST DENIED.
 
-Review: Agentic
-Requester: {requester}
-Status: Not ready for human review
 Reason: {denial_reason}
 
 Next step: Submit a new request with a specific explanation of why the alert can be dismissed, supporting evidence or links, and any relevant mitigating controls or remediation plan.
 
-Help: {help_contact}`;
+For more help, mention the Enterprise AppSec team in your alert (@/${target.teamSlug})`;
 
   return truncate(
     template
