@@ -5,6 +5,24 @@ delegated security alert dismissal requests across an enterprise.
 It supports deterministic policy checks, bounded agentic
 review, or both.
 
+## TL;DR
+
+1. A user links a risk exception issue to their alert dismissal request.
+
+   ![Risk exception issue linked to a security alert](docs/images/risk-exception-issue.png)
+
+2. The agentic workflow starts automatically and evaluates the request and its
+   linked evidence.
+3. In this measured example, about 3 minutes and $0.01 later, the insufficiently
+   justified request is denied with an actionable explanation of what to
+   provide next.
+
+   ![Dismissal request denied with actionable guidance](docs/images/actionable-denial-message.png)
+
+4. With sufficient justification, the agent still never approves the
+   dismissal: the request remains open and the alert is assigned to AppSec team
+   members for human review.
+
 | Mode | Behavior |
 |---|---|
 | `deterministic` | Immediately deny requests whose comments fail configured phrase, pattern, or length checks. Passing requests remain open. |
