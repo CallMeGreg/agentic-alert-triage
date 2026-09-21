@@ -149,7 +149,8 @@ function getAgenticSettings(config) {
     model,
     staged: agentic.staged !== false,
     helpContact:
-      agentic.help_contact || `Enterprise AppSec team (${teamSlug})`,
+      agentic.help_contact ||
+      `Enterprise AppSec team in your alert (@/${teamSlug})`,
     denialMessage: agentic.denial_message || null,
   };
 }
@@ -1085,7 +1086,7 @@ Reason: {denial_reason}
 
 Next step: Submit a new request with a specific explanation of why the alert can be dismissed, supporting evidence or links, and any relevant mitigating controls or remediation plan.
 
-For more help, mention the Enterprise AppSec team in your alert (@/${target.teamSlug})`;
+For more help, mention the {help_contact}`;
 
   return truncate(
     template
