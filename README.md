@@ -5,16 +5,23 @@ delegated security alert dismissal requests across an enterprise.
 It supports deterministic policy checks, bounded agentic
 review, or both.
 
-| Mode | Behavior |
-|---|---|
-| `deterministic` | Immediately deny requests whose comments fail configured phrase, pattern, or length checks. Passing requests remain open. |
-| `agentic` | Send every created request to the central gh-aw workflow for contextual review. |
-| `both` | Deny deterministic failures immediately and dispatch passing requests for agentic review. |
+## TL;DR
 
-> [!IMPORTANT]
-> The agent never approves a dismissal request. A request judged as "ready" remains
-open and the alert is assigned to the configured AppSec team for final human
-review.
+1. A user links a risk exception issue to their alert dismissal request.
+
+   ![Risk exception issue linked to a security alert](docs/images/risk-exception-issue.png)
+
+2. The agentic workflow starts automatically and evaluates the request and its
+   linked evidence.
+3. In this measured example, about 3 minutes and $0.01 later, the insufficiently
+   justified request is denied with an actionable explanation of what to
+   provide next.
+
+   ![Dismissal request denied with actionable guidance](docs/images/actionable-denial-message.png)
+
+4. Even with sufficient justification, the agent **never** approves the
+   dismissal: the request remains open and the alert is assigned to AppSec team
+   members for human review.
 
 ## How it works
 
