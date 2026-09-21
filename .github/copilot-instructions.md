@@ -78,8 +78,10 @@ The signed webhook `exemption_request` is the trusted request snapshot.
 6. Uses the incoming installation Octokit for deterministic denials. Resolves
    the enterprise installation with App-authenticated
    `GET /enterprises/{enterprise}/installation` and reads the enterprise team's
-   membership with that installation's Octokit via
-   `GET /enterprises/{enterprise}/teams/{enterprise-team}/memberships`.
+   membership with that installation's Octokit via the GraphQL
+   `Enterprise.enterpriseTeam.enterpriseTeamMembers` connection. Do not use the
+   REST enterprise-team membership endpoints; GitHub App tokens are unsupported
+   there.
 7. Uses App authentication to resolve the control repository installation via
    `GET /repos/{owner}/{repo}/installation`, obtains that installation Octokit
    through Probot, and creates the `repository_dispatch`.

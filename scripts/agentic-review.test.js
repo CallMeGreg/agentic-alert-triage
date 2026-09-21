@@ -916,23 +916,62 @@ describe('alert handling', () => {
     }), /enterprise team membership snapshot is required/);
   });
 
-  it('paginates the enterprise team memberships endpoint using the bare API slug', async () => {
-    const members = [{ login: 'security-one' }, { login: 'security-two' }];
+  it('paginates enterprise team membership through GraphQL using the bare API slug', async () => {
+    const cursors = [];
     const octokit = {
-      paginate: async (endpoint, parameters) => {
-        assert.equal(endpoint, 'GET /enterprises/{enterprise}/teams/{enterprise-team}/memberships');
-        assert.equal(parameters.enterprise, 'octo-enterprise');
-        assert.equal(parameters['enterprise-team'], 'appsec-team');
-        assert.equal(parameters.per_page, 100);
-        assert.equal(Object.hasOwn(parameters, 'org'), false);
-        assert.equal(Object.hasOwn(parameters, 'role'), false);
-        return members;
+      graphql: async (query, variables) => {
+        assert.match(query, /enterpriseTeamMembers\(first: 100/);
+        assert.equal(variables.enterprise, 'octo-enterprise');
+        assert.equal(variables.team, 'appsec-team');
+        cursors.push(variables.cursor);
+        return {
+          enterprise: {
+            enterpriseTeam: {
+              enterpriseTeamMembers:
+                variables.cursor === null
+                  ? {
+                      nodes: [{ login: 'security-one' }],
+                      pageInfo: {
+                        hasNextPage: true,
+                        endCursor: 'next-page',
+                      },
+                    }
+                  : {
+                      nodes: [{ login: 'security-two' }],
+                      pageInfo: {
+                        hasNextPage: false,
+                        endCursor: null,
+                      },
+                    },
+            },
+          },
+        };
       },
     };
     assert.deepEqual(
       await listEnterpriseTeamMembers(octokit, 'octo-enterprise', 'ent:appsec-team'),
-      members
+      [{ login: 'security-one' }, { login: 'security-two' }]
     );
+    assert.deepEqual(cursors, [null, 'next-page']);
+  });
+
+  it('rejects inaccessible enterprises and missing enterprise teams', async () => {
+    for (const [response, error] of [
+      [{ enterprise: null }, /cannot access enterprise octo-enterprise/],
+      [
+        { enterprise: { enterpriseTeam: null } },
+        /Enterprise team ent:appsec-team was not found/,
+      ],
+    ]) {
+      await assert.rejects(
+        listEnterpriseTeamMembers(
+          { graphql: async () => response },
+          'octo-enterprise',
+          'ent:appsec-team'
+        ),
+        error
+      );
+    }
   });
 });
 

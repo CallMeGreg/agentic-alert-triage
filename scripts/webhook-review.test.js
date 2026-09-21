@@ -149,10 +149,26 @@ function createHarness({
     },
   };
   const enterpriseOctokit = {
-    paginate: async (endpoint, parameters) => {
-      calls.teamLookups.push({ endpoint, parameters });
+    graphql: async (query, variables) => {
+      calls.teamLookups.push({ query, variables });
       if (teamFailure) throw teamFailure;
-      return typeof teamMembers === 'function' ? teamMembers(parameters) : teamMembers;
+      const members =
+        typeof teamMembers === 'function'
+          ? teamMembers(variables)
+          : teamMembers;
+      return {
+        enterprise: {
+          enterpriseTeam: {
+            enterpriseTeamMembers: {
+              nodes: members,
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null,
+              },
+            },
+          },
+        },
+      };
     },
     request: async () => assert.fail('Enterprise token must not access alerts or dispatch'),
   };
@@ -686,12 +702,15 @@ describe('agentic webhook dispatch', () => {
     );
 
     assert.equal(harness.calls.teamLookups.length, 1);
-    assert.equal(
-      harness.calls.teamLookups[0].endpoint,
-      'GET /enterprises/{enterprise}/teams/{enterprise-team}/memberships'
+    assert.match(
+      harness.calls.teamLookups[0].query,
+      /enterpriseTeamMembers\(first: 100/
     );
-    assert.equal(harness.calls.teamLookups[0].parameters.enterprise, 'octo-enterprise');
-    assert.equal(harness.calls.teamLookups[0].parameters['enterprise-team'], 'appsec-team');
+    assert.equal(
+      harness.calls.teamLookups[0].variables.enterprise,
+      'octo-enterprise'
+    );
+    assert.equal(harness.calls.teamLookups[0].variables.team, 'appsec-team');
     assert.equal(harness.calls.appAuth.filter((id) => id === 8001).length, 1);
     const payloads = harness.calls.controlRequests.map(
       (call) => call.parameters.client_payload

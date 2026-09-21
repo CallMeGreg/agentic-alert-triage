@@ -367,16 +367,73 @@ async function getAlert(octokit, owner, repo, alertType, alertNumber) {
 }
 
 async function listEnterpriseTeamMembers(octokit, enterprise, teamSlug) {
+  const enterpriseSlug = getEnterpriseSlug(enterprise);
   const enterpriseTeam = getEnterpriseTeamSlug(teamSlug).slice('ent:'.length);
-  return octokit.paginate(
-    'GET /enterprises/{enterprise}/teams/{enterprise-team}/memberships',
-    {
-      enterprise: getEnterpriseSlug(enterprise),
-      'enterprise-team': enterpriseTeam,
-      per_page: 100,
-      headers: { 'X-GitHub-Api-Version': API_VERSION },
+  const members = [];
+  let cursor = null;
+
+  do {
+    const data = await octokit.graphql(
+      `query EnterpriseTeamMembers(
+        $enterprise: String!
+        $team: String!
+        $cursor: String
+      ) {
+        enterprise(slug: $enterprise) {
+          enterpriseTeam(slug: $team) {
+            enterpriseTeamMembers(first: 100, after: $cursor) {
+              nodes {
+                login
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+            }
+          }
+        }
+      }`,
+      {
+        enterprise: enterpriseSlug,
+        team: enterpriseTeam,
+        cursor,
+      }
+    );
+    const enterpriseNode = data?.enterprise;
+    if (!enterpriseNode) {
+      throw new Error(
+        `The enterprise installation cannot access enterprise ${enterpriseSlug}.`
+      );
     }
-  );
+    const team = enterpriseNode.enterpriseTeam;
+    if (!team) {
+      throw new Error(
+        `Enterprise team ent:${enterpriseTeam} was not found in ${enterpriseSlug}.`
+      );
+    }
+    const connection = team.enterpriseTeamMembers;
+    if (
+      !connection ||
+      !Array.isArray(connection.nodes) ||
+      typeof connection.pageInfo?.hasNextPage !== 'boolean'
+    ) {
+      throw new Error(
+        `GitHub returned an invalid membership response for ${enterpriseSlug}/ent:${enterpriseTeam}.`
+      );
+    }
+
+    members.push(...connection.nodes);
+    if (connection.pageInfo.hasNextPage && !connection.pageInfo.endCursor) {
+      throw new Error(
+        `GitHub omitted the membership cursor for ${enterpriseSlug}/ent:${enterpriseTeam}.`
+      );
+    }
+    cursor = connection.pageInfo.hasNextPage
+      ? connection.pageInfo.endCursor
+      : null;
+  } while (cursor);
+
+  return members;
 }
 
 function getAssignedLogins(alertType, alert) {
