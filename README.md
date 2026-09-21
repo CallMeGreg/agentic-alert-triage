@@ -107,10 +107,7 @@ Install the same App in three scopes:
 > [!IMPORTANT]
 > The enterprise installation does not replace organization or repository
 > installations, and organization installations do not replace the enterprise
-> installation. The incoming webhook token is never assumed to access the
-> enterprise team API or control repository. Team membership is read through
-> GraphQL because GitHub's REST enterprise-team membership endpoints do not
-> support GitHub App tokens.
+> installation.
 
 After initial setup, onboarding another organization requires only installing
 the App, selecting the monitored repositories, and enabling delegated
