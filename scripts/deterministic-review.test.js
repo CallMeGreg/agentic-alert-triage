@@ -107,17 +107,18 @@ describe('deterministic dismissal review', () => {
         requester: 'octocat',
         denialReason: 'Missing required phrase.',
         repoFullName: 'my-org/my-repo',
+        helpContact: 'the security team',
       },
       {
         required_phrase: 'mitigating control',
         denial_message:
-          '{alert_type} #{alert_number} {requester} {required_phrase} {denial_reason} {repo_full_name}',
+          '{alert_type} #{alert_number} {requester} {required_phrase} {denial_reason} {repo_full_name} {help_contact}',
       }
     );
 
     assert.equal(
       message,
-      'code scanning #42 octocat mitigating control Missing required phrase. my-org/my-repo'
+      'code scanning #42 octocat mitigating control Missing required phrase. my-org/my-repo the security team'
     );
   });
 
@@ -129,24 +130,22 @@ describe('deterministic dismissal review', () => {
         requester: undefined,
         denialReason: 'Too short.',
         repoFullName: 'org/repo',
+        helpContact:
+          'Enterprise AppSec team in your alert (@/ent:appsec-team)',
       },
       {}
     );
 
     assert.equal(
       message,
-      `DISMISSAL REQUEST DENIED
+      `DISMISSAL REQUEST DENIED.
 
-Review: Automated criteria
-Alert: dependabot #7
-Requester: unknown
-Status: The dismissal comment did not meet the required criteria
 Reason: Too short.
 
 Next step: Submit a new dismissal request with an updated comment that satisfies the requirements.
 
-Source: Alert Dismissal Automation for org/repo`
+For more help, mention the Enterprise AppSec team in your alert (@/ent:appsec-team)`
     );
-    assert.doesNotMatch(message, /[*@]/);
+    assert.doesNotMatch(message, /\*/);
   });
 });
