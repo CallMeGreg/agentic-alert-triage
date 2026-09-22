@@ -773,6 +773,16 @@ describe('review modes and retry behavior', () => {
       harness.calls.incomingRequests[0].endpoint,
       'PATCH /repos/{owner}/{repo}/dismissal-requests/code-scanning/{alert_number}'
     );
+    assert.equal(
+      harness.calls.incomingRequests[0].parameters.message,
+      `DISMISSAL REQUEST DENIED.
+
+Reason: The dismissal comment did not include the required phrase: "approved exception"
+
+Next step: Submit a new dismissal request with an updated comment that satisfies the requirements.
+
+For more help, mention the Enterprise AppSec team in your alert (@/ent:appsec-team)`
+    );
     assert.deepEqual(harness.calls.appAuth, [null]);
     assert.equal(harness.calls.teamLookups.length, 0);
   });
