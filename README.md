@@ -21,7 +21,16 @@ review, or both.
 
 4. Even with sufficient justification, the agent **never** approves the
    dismissal: the request remains open and the alert is assigned to AppSec team
-   members for human review.
+   members for human review. In a different example, the linked issue provides
+   concrete reachability analysis, so the workflow run summary records a
+   `Ready for human review` decision with the agent's rationale.
+
+   ![Agentic review decision summary marking the request ready for human review](docs/images/ready-for-review-decision-summary.png)
+
+   The App then assigns the alert to an AppSec team member, who makes the
+   final decision on the open dismissal request.
+
+   ![Alert assigned to an AppSec team member by the App](docs/images/ready-for-review-alert-assignment.png)
 
 ## How it works
 
