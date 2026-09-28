@@ -21,7 +21,7 @@ review, or both.
 
 4. Even with sufficient justification, the agent **never** approves the
    dismissal: the request remains open and the alert is assigned to AppSec team
-   members for human review. In this example, the linked issue provides
+   members for human review. In a different example, the linked issue provides
    concrete reachability analysis, so the workflow run summary records a
    `Ready for human review` decision with the agent's rationale.
 
