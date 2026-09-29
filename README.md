@@ -57,60 +57,38 @@ Requester comments, alert fields, and linked issue content are treated as
 untrusted evidence, never as instructions. Secrets and credentials are excluded
 or redacted, and ambiguous requests are denied rather than guessed.
 
-### Example: denied request
-
-In this run, [@gmohler213](https://github.com/gmohler213) (the developer)
-asks to dismiss a Dependabot alert for `pycrypto` without concrete evidence.
-The request was denied about 3.5 minutes after it was submitted.
-
-1. The developer opens an issue that claims the vulnerable code is never
-   invoked, but does not show how the package is used or why the vulnerable
-   path can't be reached.
-
-   ![Issue claiming the vulnerable code is unreachable, without supporting evidence](docs/images/deny-issue.png)
-
-2. The developer requests to dismiss the alert as "Vulnerable code is not
-   actually used" and links the issue.
-
-   ![Dependabot alert dismissal request that links the issue](docs/images/deny-request.png)
-
-3. The agentic workflow reviews the request and the linked issue, and the run
-   summary records a `Deny` decision with the agent's rationale.
-
-   ![Workflow run summary with a Deny decision](docs/images/deny-decision-summary.png)
-
-4. The App denies the request with an explanation of what is missing and what
-   to provide next. The alert stays open.
-
-   ![Dismissal request denied with actionable guidance](docs/images/deny-message.png)
-
 ### Example: ready for human review
 
-In this run, the same developer asks to dismiss a Dependabot alert for
-`python-dotenv` and links a detailed reachability analysis. The alert was
-assigned to the AppSec team about 3.5 minutes after the request was submitted.
+[@gmohler213](https://github.com/gmohler213), the developer, asks to dismiss
+Dependabot alert #229 for `python-dotenv` as "Vulnerable code is not actually
+used" and links a detailed reachability analysis.
 
-1. The developer opens an issue that traces the vulnerable functions, shows
-   they are never imported or called by the service or its dependencies, and
-   includes runtime evidence.
+1. The linked issue traces the vulnerable functions and shows that the
+   service, its dependencies, and a runtime trace never reach them.
 
    ![Issue with a detailed reachability analysis for the Dependabot alert](docs/images/ready-issue.png)
 
-2. The developer requests to dismiss the alert as "Vulnerable code is not
-   actually used" and links the issue.
-
-   ![Dependabot alert dismissal request that links the reachability analysis](docs/images/ready-request.png)
-
-3. The run summary records a `Ready for human review` decision, the assigned
-   AppSec member, and the agent's rationale.
-
-   ![Workflow run summary with a Ready for human review decision](docs/images/ready-decision-summary.png)
-
-4. The App assigns the alert to an AppSec team member,
+2. About 3.5 minutes later, the agent decides the request is ready for human
+   review. The App assigns the alert to an AppSec team member,
    [@CallMeGreg](https://github.com/CallMeGreg), and leaves the dismissal
-   request open. The AppSec team member makes the final decision.
+   request open for them to make the final decision.
 
-   ![Alert assigned to an AppSec team member with the dismissal request still open](docs/images/ready-assignment.png)
+   ![Dismissal request linking the issue, with the alert assigned to an AppSec team member by the App](docs/images/ready-decision.png)
+
+### Example: denied request
+
+The same developer asks to dismiss the same alert, but links an issue that
+only claims the code is unreachable.
+
+1. The linked issue makes a one-sentence claim with no usage details,
+   reachability analysis, or other evidence a reviewer can verify.
+
+   ![Issue claiming the vulnerable code is unreachable, without supporting evidence](docs/images/deny-issue.png)
+
+2. About 3.5 minutes later, the App denies the request and explains what is
+   missing and what to provide next. The alert stays open.
+
+   ![Dismissal request denied with actionable guidance](docs/images/deny-decision.png)
 
 ## Setup
 
