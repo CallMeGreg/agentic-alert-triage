@@ -11,7 +11,7 @@ review, or both.
   their justification.
 - The App checks the request and starts an agentic review in a central
   workflow repository.
-- In about 3-4 minutes, the agent does one of two things:
+- In about 3 minutes, the agent does one of two things:
   - **Deny:** the request is closed with guidance on what evidence is missing.
   - **Ready for human review:** the request stays open and the alert is
     assigned to an AppSec team member.
@@ -68,7 +68,7 @@ used" and links a detailed reachability analysis.
 
    ![Issue with a detailed reachability analysis for the Dependabot alert](docs/images/ready-issue.png)
 
-2. About 3.5 minutes later, the agent decides the request is ready for human
+2. About 3 minutes later, the agent decides the request is ready for human
    review. The App assigns the alert to an AppSec team member,
    [@CallMeGreg](https://github.com/CallMeGreg), and leaves the dismissal
    request open for them to make the final decision.
@@ -85,7 +85,7 @@ only claims the code is unreachable.
 
    ![Issue claiming the vulnerable code is unreachable, without supporting evidence](docs/images/deny-issue.png)
 
-2. About 3.5 minutes later, the App denies the request and explains what is
+2. About 3 minutes later, the App denies the request and explains what is
    missing and what to provide next. The alert stays open.
 
    ![Dismissal request denied with actionable guidance](docs/images/deny-decision.png)
