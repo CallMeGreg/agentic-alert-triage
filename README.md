@@ -7,36 +7,22 @@ review, or both.
 
 ## TL;DR
 
-1. A user links a risk exception issue to their alert dismissal request.
-
-   ![Risk exception issue linked to a security alert](docs/images/risk-exception-issue.png)
-
-2. The agentic workflow starts automatically and evaluates the request and its
-   linked evidence.
-3. In this measured example, about 3 minutes and $0.01 later, the insufficiently
-   justified request is denied with an actionable explanation of what to
-   provide next.
-
-   ![Dismissal request denied with actionable guidance](docs/images/actionable-denial-message.png)
-
-4. Even with sufficient justification, the agent **never** approves the
-   dismissal: the request remains open and the alert is assigned to AppSec team
-   members for human review. In a different example, the linked issue provides
-   concrete reachability analysis, so the workflow run summary records a
-   `Ready for human review` decision with the agent's rationale.
-
-   ![Agentic review decision summary marking the request ready for human review](docs/images/ready-for-review-decision-summary.png)
-
-   The App then assigns the alert to an AppSec team member, who makes the
-   final decision on the open dismissal request.
-
-   ![Alert assigned to an AppSec team member by the App](docs/images/ready-for-review-alert-assignment.png)
+- A developer requests to dismiss a security alert and links an issue with
+  their justification.
+- The App checks the request and starts an agentic review in a central
+  workflow repository.
+- In about 3 minutes, the agent does one of two things:
+  - **Deny:** the request is closed with guidance on what evidence is missing.
+  - **Ready for human review:** the request stays open and the alert is
+    assigned to an AppSec team member.
+- The agent **never** approves a dismissal. A human on the AppSec team makes
+  the final decision.
 
 ## How it works
 
 1. **A requester asks to dismiss an alert.** The App responds to newly created
    delegated dismissal requests for code scanning, Dependabot, and secret
-   scanning alerts.
+   scanning alerts. The signed webhook is the trusted snapshot of the request.
 
 2. **The configured review mode determines the checks.**
    - Deterministic review checks whether the request comment meets configured
@@ -49,7 +35,16 @@ review, or both.
    - `both` applies the deterministic requirements first, then sends passing
      requests through agentic review.
 
-3. **The request is routed to the next outcome.**
+3. **The App dispatches the agentic workflow.** Passing requests are sent as a
+   `repository_dispatch` to the central workflow repository. Before the agent
+   runs, the workflow authenticates as the App, validates the dispatch, and
+   fetches the current alert plus up to five linked issues from the same
+   organization. The agent can only read that prepared context: it has no
+   GitHub tools, no write access, and no network access beyond the model.
+
+4. **The agent picks exactly one outcome.** A separate SafeOutput job applies
+   it with the App's credentials and writes a decision summary to the workflow
+   run.
    - `ready_for_review`: the request remains open and the alert is assigned to
      the enterprise AppSec team for a final human decision.
    - `deny`: the request is denied with an explanation of what is missing or
@@ -61,6 +56,39 @@ review, or both.
 Requester comments, alert fields, and linked issue content are treated as
 untrusted evidence, never as instructions. Secrets and credentials are excluded
 or redacted, and ambiguous requests are denied rather than guessed.
+
+### Example: ready for human review
+
+[@gmohler213](https://github.com/gmohler213), the developer, asks to dismiss
+Dependabot alert #229 for `python-dotenv` as "Vulnerable code is not actually
+used" and links a detailed reachability analysis.
+
+1. The linked issue traces the vulnerable functions and shows that the
+   service, its dependencies, and a runtime trace never reach them.
+
+   ![Issue with a detailed reachability analysis for the Dependabot alert](docs/images/ready-issue.png)
+
+2. About 3 minutes later, the agent decides the request is ready for human
+   review. The App assigns the alert to an AppSec team member,
+   [@CallMeGreg](https://github.com/CallMeGreg), and leaves the dismissal
+   request open for them to make the final decision.
+
+   ![Dismissal request linking the issue, with the alert assigned to an AppSec team member by the App](docs/images/ready-decision.png)
+
+### Example: denied request
+
+The same developer asks to dismiss the same alert, but links an issue that
+only claims the code is unreachable.
+
+1. The linked issue makes a one-sentence claim with no usage details,
+   reachability analysis, or other evidence a reviewer can verify.
+
+   ![Issue claiming the vulnerable code is unreachable, without supporting evidence](docs/images/deny-issue.png)
+
+2. About 3 minutes later, the App denies the request and explains what is
+   missing and what to provide next. The alert stays open.
+
+   ![Dismissal request denied with actionable guidance](docs/images/deny-decision.png)
 
 ## Setup
 
