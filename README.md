@@ -99,22 +99,89 @@ only claims the code is unreachable.
 ### 1. Meet the prerequisites
 
 - Node.js 22 or newer. GitHub Actions may use Node.js 24.
-- One
-  [GitHub App owned by the enterprise](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-github-apps-for-your-enterprise/creating-github-apps-for-your-enterprise).
-  Enterprise-owned Apps have internal visibility and can be installed only
-  within that enterprise.
-- A central workflow repository in an organization inside the same enterprise.
-- One nonempty enterprise team, such as `ent:appsec-team`, with the
-  [**enterprise Security Manager role**](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-accounts-and-repositories/managing-roles-in-your-enterprise/assign-roles).
+- Git and the [GitHub CLI](https://cli.github.com/).
 - Delegated alert dismissal enabled in every monitored organization.
 
-### 2. Register and configure the GitHub App
+### 2. Prepare the local project
 
-[`app.yml`](app.yml) is the Probot manifest for initial registration. Changing
-it does not update an existing App, so verify existing registrations in the
-GitHub App settings UI.
+```bash
+git clone https://github.com/CallMeGreg/agentic-alert-triage.git
+cd agentic-alert-triage
+npm ci
+cp .env.example .env
+```
 
-Configure these permissions:
+Choose a strong webhook secret (e.g. `openssl rand -base64 16`) and set `WEBHOOK_SECRET` in `.env`. You will
+enter the same value when registering the App. Leave `APP_ID` empty until
+registration is complete; the private key file does not exist yet.
+
+Do not start Probot yet. Complete the manual registration and credentials
+steps below before running `npm start`.
+
+### 3. Copy the project to a central repository (DO NOT FORK)
+
+Choose an organization inside your enterprise to host the central workflow
+repository. Create a new, independent repository containing this project,
+**not a fork**. From the local clone, replace `YOUR_SECURITY_ORG` with that
+organization's slug and run:
+
+```bash
+gh auth login --hostname github.com --scopes workflow
+gh repo create YOUR_SECURITY_ORG/alert-triage --private --source=. --remote=control --push
+gh repo edit YOUR_SECURITY_ORG/alert-triage --default-branch main
+```
+
+The authenticated account needs permission to create repositories in that
+organization and push workflow files. These commands copy the committed
+project, including its dependency manifests, scripts, and generated workflow,
+to the new repository. They do not create a fork relationship or upload the
+ignored `.env` and private key files.
+
+Keep `origin` pointing to the source project and use the new `control` remote
+for your enterprise's copy. Set `agentic.workflow_repository` to
+`YOUR_SECURITY_ORG/alert-triage` in step 7; publish your configuration changes
+before starting the service.
+
+### 4. Create the enterprise AppSec team and assign its role
+
+An enterprise owner should
+[create the enterprise team](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-accounts-and-repositories/managing-users-in-your-enterprise/create-enterprise-teams)
+and [assign its role](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-accounts-and-repositories/managing-roles-in-your-enterprise/assign-roles):
+
+1. Open the enterprise's **People** tab, then **Enterprise teams**, and click
+   **Create Enterprise team**. Create a team such as `appsec-team`, or reuse
+   an existing enterprise AppSec team.
+2. Open the team and use **Add members** to add the security reviewers. The
+   team must have at least one member.
+3. Under **People**, open **Enterprise roles**, then **Role assignments**.
+   Click **Assign role**, select the enterprise team and the **Security
+   Manager** role, and confirm the assignment.
+4. Record the team's URL slug with the `ent:` prefix, such as
+   `ent:appsec-team`, for `agentic.appsec_team_slug` in step 7.
+
+Use one enterprise team across the monitored organizations, not separate
+organization teams. The enterprise Security Manager role supplies repository
+read and security-alert management access for the human reviewers.
+
+### 5. Register the App directly under your enterprise
+
+Follow GitHub's
+[enterprise App registration guide](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-github-apps-for-your-enterprise/creating-github-apps-for-your-enterprise),
+working with an enterprise owner to register and install the App:
+
+1. Open your **enterprise settings**, then **GitHub Apps** under Settings, and
+   click **New GitHub App**. Do not use your personal or organization developer
+   settings.
+2. Enter a globally unique App name and a homepage URL, such as your central
+   workflow repository's URL.
+3. Enable webhooks and set the webhook URL to your public Probot endpoint,
+   `https://your-service.example/api/github/webhooks`. For local testing, use
+   an approved HTTPS tunnel or forwarding relay; see
+   [local webhook development](#local-webhook-development).
+4. Enter the same webhook secret as `WEBHOOK_SECRET` in `.env` and keep SSL
+   verification enabled.
+
+Before creating the App, configure these permissions by their display names:
 
 | Scope | Permission shown in GitHub | Access | Purpose |
 |---|---|---|---|
@@ -135,10 +202,21 @@ Configure these webhook subscriptions:
 - Dismissal request for Dependabot
 - Dismissal request for secret scanning
 
-Set the webhook secret to the same strong value used by the Probot service.
+Click **Create GitHub App**. Enterprise-owned Apps have internal visibility
+and can be installed only within that enterprise.
 
-### 3. Install the App
+On the App's settings page, record the **App ID** and **Client ID**, then click
+**Generate a private key**. Save the downloaded PEM securely, for example as
+`github-app.private-key.pem` in the project directory, matching
+`PRIVATE_KEY_PATH` in `.env`. Never commit the key or `.env`.
 
+For an existing enterprise-owned App, verify these permissions, subscriptions,
+and webhook settings in its settings UI rather than registering another App.
+
+### 6. Install the App
+
+In the enterprise App's settings, open **Install App** or visit
+`https://github.com/apps/YOUR_APP_SLUG/installations/new`.
 Install the same App in three scopes:
 
 1. **Enterprise account:** provides enterprise team membership access.
@@ -150,18 +228,18 @@ Install the same App in three scopes:
 
 > [!IMPORTANT]
 > The enterprise installation does not replace organization or repository
-> installations, and organization installations do not replace the enterprise
-> installation. The incoming webhook token is never assumed to access the
-> enterprise team API or control repository.
+> installations, and organization installations do not replace the required
+> enterprise installation.
 
 After initial setup, onboarding another organization requires only installing
 the App, selecting the monitored repositories, and enabling delegated
 dismissal. No separate AppSec team is needed.
 
-### 4. Configure the service and workflow
+### 7. Configure the service and workflow
 
-[`config.yml`](config.yml) is loaded once when Probot starts. Keep the service
-and control repository copies aligned:
+[`config.yml`](config.yml) is loaded once when Probot starts, however the
+control repository's `config.yml` is referenced at runtime by the agentic workflow,
+so the copies must stay aligned:
 
 ```yaml
 enterprise: your-enterprise
@@ -191,9 +269,8 @@ cache:
   delivery_dedupe_max_entries: 1000
 ```
 
-`enterprise` is required in every mode. The target organization always comes
-from the validated webhook snapshot, never the control repository owner or
-`GITHUB_REPOSITORY`.
+`enterprise` is required in every mode. The target organization comes
+from the validated webhook snapshot.
 
 | Key | Default | Description |
 |---|---|---|
@@ -230,9 +307,11 @@ labels and plain URLs instead of other Markdown in denial templates. Avoid
 organization-specific names in shared regexes and denial templates. The
 agentic workflow reads linked evidence only from the target organization.
 
-### 5. Configure credentials
+### 8. Configure credentials
 
-Set these values for the persistent Probot service:
+Fill the `.env` prepared in step 2 with the App ID, private key path, and
+matching webhook secret from registration. In production, supply these values
+through your deployment's environment and secret store:
 
 | Variable | Required | Description |
 |---|---:|---|
@@ -248,7 +327,7 @@ Set these Actions secrets in the control repository:
 
 | Secret | Description |
 |---|---|
-| `ALERT_DISMISSAL_APP_CLIENT_ID` | Client ID for the same GitHub App |
+| `ALERT_DISMISSAL_APP_CLIENT_ID` | Client ID for the same GitHub App, not its App ID |
 | `ALERT_DISMISSAL_APP_PRIVATE_KEY` | Full private key PEM for that App |
 
 Set this Actions variable in the control repository:
@@ -261,6 +340,42 @@ Workflow jobs authenticate as the App before selecting the target organization.
 The model never receives App credentials or installation tokens. Copilot
 inference uses `copilot-requests: write` on the workflow's built-in Actions
 token.
+
+### 9. Publish configuration, start the service, and verify a test request
+
+Publish the updated `config.yml` to the independent central repository created
+in step 3:
+
+```bash
+git add config.yml
+git commit -m "Configure enterprise alert triage"
+git push control main
+```
+
+> [!IMPORTANT]
+> If you change the workflow source,
+[compile it and commit both workflow files](#compile-and-stage-the-workflow)
+before pushing. **The app service and the control repository's default branch must
+use matching configuration values.**
+
+With all credentials configured, start Probot:
+
+```bash
+npm start
+```
+
+If Probot displays its registration wizard instead of starting the configured
+App, stop it and check `APP_ID` and `PRIVATE_KEY` or `PRIVATE_KEY_PATH`; do not
+register another App through the wizard.
+
+Submit a dismissal request on a test repository. Check the App's webhook
+deliveries and, for requests routed to agentic review, the control repository's
+Actions run and decision summary.
+
+Keep `agentic.staged: true` while evaluating agentic decisions. This previews
+agentic writes only: deterministic denials in `deterministic` or `both` mode
+are immediate. To enable agentic writes, set `agentic.staged: false` in both
+configuration copies and restart Probot.
 
 ## Deploy
 
@@ -319,18 +434,27 @@ branch. Keep `agentic.staged: true` while reviewing workflow summaries and
 gh-aw audit logs. Set it to `false` only when decisions are ready to write.
 Restart Probot after configuration changes.
 
-For local webhook development:
+### Local webhook development
+
+Complete the manual enterprise App setup above first. Reuse its credentials
+and `.env`; do not overwrite them or use Probot's registration wizard.
+
+Use an approved HTTPS tunnel to expose
+`http://localhost:3000/api/github/webhooks`, and set the App's webhook URL to
+that tunnel's HTTPS endpoint. Leave `WEBHOOK_PROXY_URL` unset for a direct
+tunnel. Alternatively, configure an approved forwarding relay by using its
+URL for both the App's webhook URL and `WEBHOOK_PROXY_URL`.
+
+Keep the App's webhook secret identical to `WEBHOOK_SECRET`, then run:
 
 ```bash
-cp .env.example .env
-# Fill APP_ID, PRIVATE_KEY_PATH, WEBHOOK_SECRET, and WEBHOOK_PROXY_URL.
-npm install
 npm run dev
 ```
 
-Create a temporary forwarding URL at [smee.io](https://smee.io/new), use it for
-both the App webhook URL and `WEBHOOK_PROXY_URL`, and keep its secret identical
-to `WEBHOOK_SECRET`.
+Public relays such as [smee.io](https://smee.io/new) should be limited to
+synthetic test payloads; do not forward real security-alert data through them.
+
+### Checks
 
 Run the repository checks:
 

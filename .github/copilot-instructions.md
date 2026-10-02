@@ -32,7 +32,6 @@ Secret scanning delegated dismissal is public preview.
 │   ├── webhook-review.js
 │   └── webhook-review.test.js
 ├── .env.example
-├── app.yml
 ├── config.yml
 ├── Dockerfile
 ├── index.js
@@ -171,9 +170,10 @@ Repository permissions:
 - Issues: read for linked evidence
 - Metadata: read
 
-Do not invent manifest permission slugs for delegated-dismissal permissions.
-`app.yml` uses GitHub's current documented slugs, and existing registrations
-must still be updated and verified by display name in the App UI.
+Register the App manually in the enterprise GitHub App settings UI and verify
+permissions by display name. GitHub App manifests do not support
+enterprise-owned Apps or enterprise permissions; do not add a Probot
+registration manifest or direct users to its local registration wizard.
 
 The AppSec team slug defaults to `ent:appsec-team`; require the `ent:` prefix.
 The enterprise team is assumed to hold the enterprise Security Manager role,
