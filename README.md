@@ -99,11 +99,7 @@ only claims the code is unreachable.
 ### 1. Meet the prerequisites
 
 - Node.js 22 or newer. GitHub Actions may use Node.js 24.
-- Access to register and install a GitHub App in your enterprise, normally
-  through an enterprise owner.
-- A central workflow repository in an organization inside the same enterprise.
-- One nonempty enterprise team, such as `ent:appsec-team`, with the
-  [**enterprise Security Manager role**](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-accounts-and-repositories/managing-roles-in-your-enterprise/assign-roles).
+- Git and the [GitHub CLI](https://cli.github.com/).
 - Delegated alert dismissal enabled in every monitored organization.
 
 ### 2. Prepare the local project
@@ -122,7 +118,52 @@ registration is complete; the private key file does not exist yet.
 Do not start Probot yet. Complete the manual registration and credentials
 steps below before running `npm start`.
 
-### 3. Register the App directly under your enterprise
+### 3. Copy the project to a central repository (do not fork)
+
+Choose an organization inside your enterprise to host the central workflow
+repository. Create a new, independent repository containing this project,
+**not a fork**. From the local clone, replace `YOUR_SECURITY_ORG` with that
+organization's slug and run:
+
+```bash
+gh auth login --hostname github.com --scopes workflow
+gh repo create YOUR_SECURITY_ORG/alert-triage --private --source=. --remote=control --push
+gh repo edit YOUR_SECURITY_ORG/alert-triage --default-branch main
+```
+
+The authenticated account needs permission to create repositories in that
+organization and push workflow files. These commands copy the committed
+project, including its dependency manifests, scripts, and generated workflow,
+to the new repository. They do not create a fork relationship or upload the
+ignored `.env` and private key files.
+
+Keep `origin` pointing to the source project and use the new `control` remote
+for your enterprise's copy. Set `agentic.workflow_repository` to
+`YOUR_SECURITY_ORG/alert-triage` in step 7; publish your configuration changes
+before starting the service.
+
+### 4. Create the enterprise AppSec team and assign its role
+
+An enterprise owner should
+[create the enterprise team](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-accounts-and-repositories/managing-users-in-your-enterprise/create-enterprise-teams)
+and [assign its role](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-accounts-and-repositories/managing-roles-in-your-enterprise/assign-roles):
+
+1. Open the enterprise's **People** tab, then **Enterprise teams**, and click
+   **Create Enterprise team**. Create a team such as `appsec-team`, or reuse
+   an existing enterprise AppSec team.
+2. Open the team and use **Add members** to add the security reviewers. The
+   team must have at least one member.
+3. Under **People**, open **Enterprise roles**, then **Role assignments**.
+   Click **Assign role**, select the enterprise team and the **Security
+   Manager** role, and confirm the assignment.
+4. Record the team's URL slug with the `ent:` prefix, such as
+   `ent:appsec-team`, for `agentic.appsec_team_slug` in step 7.
+
+Use one enterprise team across the monitored organizations, not separate
+organization teams. The enterprise Security Manager role supplies repository
+read and security-alert management access for the human reviewers.
+
+### 5. Register the App directly under your enterprise
 
 > [!IMPORTANT]
 > [GitHub App manifests do not support enterprise-owned Apps or enterprise
@@ -131,7 +172,8 @@ steps below before running `npm start`.
 > enterprise ownership and rejects personal-account or organization-owned Apps.
 
 Follow GitHub's
-[enterprise App registration guide](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-github-apps-for-your-enterprise/creating-github-apps-for-your-enterprise):
+[enterprise App registration guide](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-github-apps-for-your-enterprise/creating-github-apps-for-your-enterprise),
+working with an enterprise owner to register and install the App:
 
 1. Open your **enterprise settings**, then **GitHub Apps** under Settings, and
    click **New GitHub App**. Do not use your personal or organization developer
@@ -178,7 +220,7 @@ On the App's settings page, record the **App ID** and **Client ID**, then click
 For an existing enterprise-owned App, verify these permissions, subscriptions,
 and webhook settings in its settings UI rather than registering another App.
 
-### 4. Install the App
+### 6. Install the App
 
 In the enterprise App's settings, open **Install App** or visit
 `https://github.com/apps/YOUR_APP_SLUG/installations/new`.
@@ -201,7 +243,7 @@ After initial setup, onboarding another organization requires only installing
 the App, selecting the monitored repositories, and enabling delegated
 dismissal. No separate AppSec team is needed.
 
-### 5. Configure the service and workflow
+### 7. Configure the service and workflow
 
 [`config.yml`](config.yml) is loaded once when Probot starts. Keep the service
 and control repository copies aligned:
@@ -273,7 +315,7 @@ labels and plain URLs instead of other Markdown in denial templates. Avoid
 organization-specific names in shared regexes and denial templates. The
 agentic workflow reads linked evidence only from the target organization.
 
-### 6. Configure credentials
+### 8. Configure credentials
 
 Fill the `.env` prepared in step 2 with the App ID, private key path, and
 matching webhook secret from registration. In production, supply these values
@@ -307,12 +349,21 @@ The model never receives App credentials or installation tokens. Copilot
 inference uses `copilot-requests: write` on the workflow's built-in Actions
 token.
 
-### 7. Start the service and verify a test request
+### 9. Publish configuration, start the service, and verify a test request
 
-Publish this project to the control repository's **default branch**, including
-the dependency manifests, scripts, matching `config.yml`, and generated workflow.
-Enable GitHub Actions. If you change the workflow source,
-[compile it before publishing](#compile-and-stage-the-workflow).
+Publish the updated `config.yml` to the independent central repository created
+in step 3:
+
+```bash
+git add config.yml
+git commit -m "Configure enterprise alert triage"
+git push control main
+```
+
+Enable GitHub Actions in that repository. If you change the workflow source,
+[compile it and commit both workflow files](#compile-and-stage-the-workflow)
+before pushing. The service and the control repository's default branch must
+use matching configuration.
 
 With all credentials configured, start Probot:
 
