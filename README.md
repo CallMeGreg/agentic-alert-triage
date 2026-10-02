@@ -99,22 +99,54 @@ only claims the code is unreachable.
 ### 1. Meet the prerequisites
 
 - Node.js 22 or newer. GitHub Actions may use Node.js 24.
-- One
-  [GitHub App owned by the enterprise](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-github-apps-for-your-enterprise/creating-github-apps-for-your-enterprise).
-  Enterprise-owned Apps have internal visibility and can be installed only
-  within that enterprise.
+- Access to register and install a GitHub App in your enterprise, normally
+  through an enterprise owner.
 - A central workflow repository in an organization inside the same enterprise.
 - One nonempty enterprise team, such as `ent:appsec-team`, with the
   [**enterprise Security Manager role**](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-accounts-and-repositories/managing-roles-in-your-enterprise/assign-roles).
 - Delegated alert dismissal enabled in every monitored organization.
 
-### 2. Register and configure the GitHub App
+### 2. Prepare the local project
 
-[`app.yml`](app.yml) is the Probot manifest for initial registration. Changing
-it does not update an existing App, so verify existing registrations in the
-GitHub App settings UI.
+```bash
+git clone https://github.com/CallMeGreg/agentic-alert-triage.git
+cd agentic-alert-triage
+npm ci
+cp .env.example .env
+```
 
-Configure these permissions:
+Choose a strong webhook secret and set `WEBHOOK_SECRET` in `.env`. You will
+enter the same value when registering the App. Leave `APP_ID` empty until
+registration is complete; the private key file does not exist yet.
+
+Do not start Probot yet. Complete the manual registration and credentials
+steps below before running `npm start`.
+
+### 3. Register the App directly under your enterprise
+
+> [!IMPORTANT]
+> [GitHub App manifests do not support enterprise-owned Apps or enterprise
+> permissions](https://docs.github.com/en/enterprise-cloud@latest/apps/sharing-github-apps/registering-a-github-app-from-a-manifest).
+> Do not use Probot's local registration wizard. This service requires
+> enterprise ownership and rejects personal-account or organization-owned Apps.
+
+Follow GitHub's
+[enterprise App registration guide](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-github-apps-for-your-enterprise/creating-github-apps-for-your-enterprise):
+
+1. Open your **enterprise settings**, then **GitHub Apps** under Settings, and
+   click **New GitHub App**. Do not use your personal or organization developer
+   settings.
+2. Enter a globally unique App name and a homepage URL, such as your central
+   workflow repository's URL.
+3. Enable webhooks and set the webhook URL to your public Probot endpoint,
+   `https://your-service.example/api/github/webhooks`. For local testing, use
+   an approved HTTPS tunnel or forwarding relay; see
+   [local webhook development](#local-webhook-development).
+4. Enter the same webhook secret as `WEBHOOK_SECRET` in `.env` and keep SSL
+   verification enabled. User authorization, OAuth callbacks, and device flow
+   are not required; this App authenticates as the App and its installations.
+
+Before creating the App, configure these permissions by their display names:
 
 | Scope | Permission shown in GitHub | Access | Purpose |
 |---|---|---|---|
@@ -135,10 +167,21 @@ Configure these webhook subscriptions:
 - Dismissal request for Dependabot
 - Dismissal request for secret scanning
 
-Set the webhook secret to the same strong value used by the Probot service.
+Click **Create GitHub App**. Enterprise-owned Apps have internal visibility
+and can be installed only within that enterprise.
 
-### 3. Install the App
+On the App's settings page, record the **App ID** and **Client ID**, then click
+**Generate a private key**. Save the downloaded PEM securely, for example as
+`github-app.private-key.pem` in the project directory, matching
+`PRIVATE_KEY_PATH` in `.env`. Never commit the key or `.env`.
 
+For an existing enterprise-owned App, verify these permissions, subscriptions,
+and webhook settings in its settings UI rather than registering another App.
+
+### 4. Install the App
+
+In the enterprise App's settings, open **Install App** or visit
+`https://github.com/apps/YOUR_APP_SLUG/installations/new`.
 Install the same App in three scopes:
 
 1. **Enterprise account:** provides enterprise team membership access.
@@ -158,7 +201,7 @@ After initial setup, onboarding another organization requires only installing
 the App, selecting the monitored repositories, and enabling delegated
 dismissal. No separate AppSec team is needed.
 
-### 4. Configure the service and workflow
+### 5. Configure the service and workflow
 
 [`config.yml`](config.yml) is loaded once when Probot starts. Keep the service
 and control repository copies aligned:
@@ -230,9 +273,11 @@ labels and plain URLs instead of other Markdown in denial templates. Avoid
 organization-specific names in shared regexes and denial templates. The
 agentic workflow reads linked evidence only from the target organization.
 
-### 5. Configure credentials
+### 6. Configure credentials
 
-Set these values for the persistent Probot service:
+Fill the `.env` prepared in step 2 with the App ID, private key path, and
+matching webhook secret from registration. In production, supply these values
+through your deployment's environment and secret store:
 
 | Variable | Required | Description |
 |---|---:|---|
@@ -248,7 +293,7 @@ Set these Actions secrets in the control repository:
 
 | Secret | Description |
 |---|---|
-| `ALERT_DISMISSAL_APP_CLIENT_ID` | Client ID for the same GitHub App |
+| `ALERT_DISMISSAL_APP_CLIENT_ID` | Client ID for the same GitHub App, not its App ID |
 | `ALERT_DISMISSAL_APP_PRIVATE_KEY` | Full private key PEM for that App |
 
 Set this Actions variable in the control repository:
@@ -261,6 +306,32 @@ Workflow jobs authenticate as the App before selecting the target organization.
 The model never receives App credentials or installation tokens. Copilot
 inference uses `copilot-requests: write` on the workflow's built-in Actions
 token.
+
+### 7. Start the service and verify a test request
+
+Publish this project to the control repository's **default branch**, including
+the dependency manifests, scripts, matching `config.yml`, and generated workflow.
+Enable GitHub Actions. If you change the workflow source,
+[compile it before publishing](#compile-and-stage-the-workflow).
+
+With all credentials configured, start Probot:
+
+```bash
+npm start
+```
+
+If Probot displays its registration wizard instead of starting the configured
+App, stop it and check `APP_ID` and `PRIVATE_KEY` or `PRIVATE_KEY_PATH`; do not
+register another App through the wizard.
+
+Submit a dismissal request on a test repository. Check the App's webhook
+deliveries and, for requests routed to agentic review, the control repository's
+Actions run and decision summary.
+
+Keep `agentic.staged: true` while evaluating agentic decisions. This previews
+agentic writes only: deterministic denials in `deterministic` or `both` mode
+are immediate. To enable agentic writes, set `agentic.staged: false` in both
+configuration copies and restart Probot.
 
 ## Deploy
 
@@ -319,18 +390,27 @@ branch. Keep `agentic.staged: true` while reviewing workflow summaries and
 gh-aw audit logs. Set it to `false` only when decisions are ready to write.
 Restart Probot after configuration changes.
 
-For local webhook development:
+### Local webhook development
+
+Complete the manual enterprise App setup above first. Reuse its credentials
+and `.env`; do not overwrite them or use Probot's registration wizard.
+
+Use an approved HTTPS tunnel to expose
+`http://localhost:3000/api/github/webhooks`, and set the App's webhook URL to
+that tunnel's HTTPS endpoint. Leave `WEBHOOK_PROXY_URL` unset for a direct
+tunnel. Alternatively, configure an approved forwarding relay by using its
+URL for both the App's webhook URL and `WEBHOOK_PROXY_URL`.
+
+Keep the App's webhook secret identical to `WEBHOOK_SECRET`, then run:
 
 ```bash
-cp .env.example .env
-# Fill APP_ID, PRIVATE_KEY_PATH, WEBHOOK_SECRET, and WEBHOOK_PROXY_URL.
-npm install
 npm run dev
 ```
 
-Create a temporary forwarding URL at [smee.io](https://smee.io/new), use it for
-both the App webhook URL and `WEBHOOK_PROXY_URL`, and keep its secret identical
-to `WEBHOOK_SECRET`.
+Public relays such as [smee.io](https://smee.io/new) should be limited to
+synthetic test payloads; do not forward real security-alert data through them.
+
+### Checks
 
 Run the repository checks:
 

@@ -6,7 +6,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 
-COPY --chown=node:node index.js config.yml app.yml ./
+COPY --chown=node:node index.js config.yml ./
 COPY --chown=node:node scripts ./scripts
 
 USER node
