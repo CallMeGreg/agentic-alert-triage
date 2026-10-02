@@ -237,8 +237,9 @@ dismissal. No separate AppSec team is needed.
 
 ### 7. Configure the service and workflow
 
-[`config.yml`](config.yml) is loaded once when Probot starts. Keep the service
-and control repository copies aligned:
+[`config.yml`](config.yml) is loaded once when Probot starts, however the
+control repository's `config.yml` is referenced at runtime by the agentic workflow,
+so the copies must stay aligned:
 
 ```yaml
 enterprise: your-enterprise
