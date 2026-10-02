@@ -111,14 +111,14 @@ npm ci
 cp .env.example .env
 ```
 
-Choose a strong webhook secret and set `WEBHOOK_SECRET` in `.env`. You will
+Choose a strong webhook secret (e.g. `openssl rand -base64 16`) and set `WEBHOOK_SECRET` in `.env`. You will
 enter the same value when registering the App. Leave `APP_ID` empty until
 registration is complete; the private key file does not exist yet.
 
 Do not start Probot yet. Complete the manual registration and credentials
 steps below before running `npm start`.
 
-### 3. Copy the project to a central repository (do not fork)
+### 3. Copy the project to a central repository (DO NOT FORK)
 
 Choose an organization inside your enterprise to host the central workflow
 repository. Create a new, independent repository containing this project,
@@ -165,12 +165,6 @@ read and security-alert management access for the human reviewers.
 
 ### 5. Register the App directly under your enterprise
 
-> [!IMPORTANT]
-> [GitHub App manifests do not support enterprise-owned Apps or enterprise
-> permissions](https://docs.github.com/en/enterprise-cloud@latest/apps/sharing-github-apps/registering-a-github-app-from-a-manifest).
-> Do not use Probot's local registration wizard. This service requires
-> enterprise ownership and rejects personal-account or organization-owned Apps.
-
 Follow GitHub's
 [enterprise App registration guide](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-github-apps-for-your-enterprise/creating-github-apps-for-your-enterprise),
 working with an enterprise owner to register and install the App:
@@ -185,8 +179,7 @@ working with an enterprise owner to register and install the App:
    an approved HTTPS tunnel or forwarding relay; see
    [local webhook development](#local-webhook-development).
 4. Enter the same webhook secret as `WEBHOOK_SECRET` in `.env` and keep SSL
-   verification enabled. User authorization, OAuth callbacks, and device flow
-   are not required; this App authenticates as the App and its installations.
+   verification enabled.
 
 Before creating the App, configure these permissions by their display names:
 
@@ -235,9 +228,8 @@ Install the same App in three scopes:
 
 > [!IMPORTANT]
 > The enterprise installation does not replace organization or repository
-> installations, and organization installations do not replace the enterprise
-> installation. The incoming webhook token is never assumed to access the
-> enterprise team API or control repository.
+> installations, and organization installations do not replace the required
+> enterprise installation.
 
 After initial setup, onboarding another organization requires only installing
 the App, selecting the monitored repositories, and enabling delegated
@@ -276,9 +268,8 @@ cache:
   delivery_dedupe_max_entries: 1000
 ```
 
-`enterprise` is required in every mode. The target organization always comes
-from the validated webhook snapshot, never the control repository owner or
-`GITHUB_REPOSITORY`.
+`enterprise` is required in every mode. The target organization comes
+from the validated webhook snapshot.
 
 | Key | Default | Description |
 |---|---|---|
@@ -360,10 +351,11 @@ git commit -m "Configure enterprise alert triage"
 git push control main
 ```
 
-Enable GitHub Actions in that repository. If you change the workflow source,
+> [!IMPORTANT]
+> If you change the workflow source,
 [compile it and commit both workflow files](#compile-and-stage-the-workflow)
-before pushing. The service and the control repository's default branch must
-use matching configuration.
+before pushing. **The app service and the control repository's default branch must
+use matching configuration values.**
 
 With all credentials configured, start Probot:
 
