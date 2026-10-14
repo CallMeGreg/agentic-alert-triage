@@ -13,15 +13,25 @@ review_mode: both
 # Reasons are restricted only in deterministic and both modes. Omit this option
 # or an alert type to permit all reasons. An empty list permits no reasons.
 # Use exact, case-sensitive webhook reason values, not their UI labels.
+# All currently supported reason values are shown below. Leave this block
+# commented out to permit all reasons by default, including future values.
 # allowed_dismissal_reasons:
 #   code_scanning:
 #     - "false positive"
+#     - "won't fix"
 #     - "used in tests"
+#     - "mitigated"
 #   dependabot:
-#     - not_used
+#     - "fix_started"
+#     - "inaccurate"
+#     - "no_bandwidth"
+#     - "not_used"
+#     - "tolerable_risk"
 #   secret_scanning:
-#     - revoked
-#     - false_positive
+#     - "false_positive"
+#     - "wont_fix"
+#     - "revoked"
+#     - "used_in_tests"
 
 # required_phrase: "mitigating control"
 # URL-format check only; agentic evidence remains restricted to the target org.

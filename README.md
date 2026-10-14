@@ -305,11 +305,14 @@ allowed_dismissal_reasons:
     - "false positive"
     - "used in tests"
   dependabot:
-    - not_used
+    - "not_used"
   secret_scanning:
-    - revoked
-    - false_positive
+    - "revoked"
+    - "false_positive"
 ```
+
+The commented `allowed_dismissal_reasons` block in [`config.yml`](config.yml)
+lists all currently supported reason values for each alert type.
 
 Omitting the option or an alert type permits all reasons for that type. An
 empty list (`[]`) permits no reasons. Values must be non-empty strings; use
