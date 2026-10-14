@@ -95,6 +95,12 @@ membership, not for alert reads/writes or dispatch.
   request.
 - `both`: deny deterministic failures and dispatch passing requests.
 
+`allowed_dismissal_reasons` optionally restricts exact webhook reason values
+per alert type during deterministic checks only. Omitted alert types permit
+all reasons; an empty list permits none. Disallowed reasons are denied before
+comment checks with resubmission guidance listing the permitted reasons.
+Agentic-only review ignores this option, including its validation.
+
 Known stale deterministic denial responses are safe no-ops. Other endpoint
 errors must surface.
 
@@ -260,6 +266,7 @@ Important defaults:
 | Key | Default |
 |---|---|
 | `review_mode` | `both` |
+| `allowed_dismissal_reasons` | all reasons for every alert type |
 | `alert_types` | all three alert categories |
 | `agentic.workflow_repository` | Required |
 | `agentic.model` | `auto` |

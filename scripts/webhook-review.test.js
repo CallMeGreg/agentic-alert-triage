@@ -53,6 +53,7 @@ function createPayload(
     action = 'created',
     alertNumbers = [8],
     comment = 'Tracked in https://github.com/octo-org/service/issues/12',
+    reason,
     requestDataType,
     requestOverrides = {},
     payloadOverrides = {},
@@ -80,7 +81,10 @@ function createPayload(
         type: requestDataType || definition.dataType,
         data: alertNumbers.map((alertNumber, index) => ({
           alert_number: alertNumber,
-          reason: index === 0 ? 'used in tests' : 'accepted risk',
+          reason:
+            reason === undefined
+              ? index === 0 ? 'used in tests' : 'accepted risk'
+              : reason,
           ...(alertType === 'secret_scanning'
             ? { secret_type: 'github_personal_access_token' }
             : {}),
@@ -745,6 +749,257 @@ describe('agentic webhook dispatch', () => {
       ),
       false
     );
+  });
+});
+
+describe('deterministic dismissal reason policy', () => {
+  const permittedReasons = {
+    code_scanning: ['false positive', 'used in tests'],
+    dependabot: ['not_used', 'inaccurate'],
+    secret_scanning: ['revoked', 'false_positive'],
+  };
+  const disallowedReasons = {
+    code_scanning: "won't fix",
+    dependabot: 'tolerable_risk',
+    secret_scanning: 'wont_fix',
+  };
+
+  for (const [alertType, definition] of Object.entries(EVENT_DEFINITIONS)) {
+    for (const reviewMode of ['deterministic', 'both']) {
+      it(`denies disallowed ${alertType} reasons with resubmission guidance in ${reviewMode} mode`, async () => {
+        const harness = createHarness({
+          config: createConfig({
+            review_mode: reviewMode,
+            allowed_dismissal_reasons: permittedReasons,
+          }),
+        });
+        const context = createContext({
+          alertType,
+          payload: createPayload(alertType, {
+            alertNumbers: [8, 8, 13],
+            reason: disallowedReasons[alertType],
+          }),
+          octokit: harness.incomingOctokit,
+        });
+
+        const result = await harness.handler(context, definition.eventName);
+        const retry = await harness.handler(context, definition.eventName);
+
+        assert.equal(result.action, 'denied');
+        assert.equal(retry.duplicateCount, 2);
+        assert.deepEqual(
+          harness.calls.incomingRequests.map(
+            (call) => call.parameters.alert_number
+          ),
+          [8, 13]
+        );
+        for (const call of harness.calls.incomingRequests) {
+          assert.equal(
+            call.endpoint,
+            `PATCH /repos/{owner}/{repo}/dismissal-requests/${alertType.replace(/_/g, '-')}/{alert_number}`
+          );
+          assert.match(
+            call.parameters.message,
+            /Please resubmit the dismissal request/
+          );
+          assert.match(call.parameters.message, /Permitted reasons:/);
+          for (const reason of permittedReasons[alertType]) {
+            assert.ok(call.parameters.message.includes(JSON.stringify(reason)));
+          }
+        }
+        assert.deepEqual(harness.calls.appAuth, [null]);
+        assert.equal(harness.calls.teamLookups.length, 0);
+        assert.equal(harness.calls.controlRequests.length, 0);
+      });
+
+      it(`allows permitted ${alertType} reasons in ${reviewMode} mode`, async () => {
+        const harness = createHarness({
+          config: createConfig({
+            review_mode: reviewMode,
+            allowed_dismissal_reasons: permittedReasons,
+          }),
+        });
+        const result = await harness.handler(
+          createContext({
+            alertType,
+            payload: createPayload(alertType, {
+              reason: permittedReasons[alertType][0],
+            }),
+            octokit: harness.incomingOctokit,
+          }),
+          definition.eventName
+        );
+
+        assert.equal(
+          result.action,
+          reviewMode === 'both' ? 'dispatched' : 'leave_open'
+        );
+        assert.equal(harness.calls.incomingRequests.length, 0);
+        assert.equal(
+          harness.calls.controlRequests.length,
+          reviewMode === 'both' ? 1 : 0
+        );
+      });
+    }
+
+    it(`does not restrict ${alertType} reasons when its list is omitted`, async () => {
+      const otherAlertType =
+        alertType === 'secret_scanning' ? 'dependabot' : 'secret_scanning';
+      for (const policy of [undefined, {}, { [otherAlertType]: [] }]) {
+        const harness = createHarness({
+          config: createConfig({
+            review_mode: 'deterministic',
+            allowed_dismissal_reasons: policy,
+          }),
+        });
+        const result = await harness.handler(
+          createContext({
+            alertType,
+            payload: createPayload(alertType, {
+              reason: disallowedReasons[alertType],
+            }),
+            octokit: harness.incomingOctokit,
+          }),
+          definition.eventName
+        );
+        assert.equal(result.action, 'leave_open');
+        assert.equal(harness.calls.incomingRequests.length, 0);
+      }
+    });
+
+    it(`ignores the dismissal reason policy for ${alertType} in agentic-only mode`, async () => {
+      const harness = createHarness({
+        config: createConfig({
+          review_mode: 'agentic',
+          required_phrase: 'missing phrase',
+          allowed_dismissal_reasons: permittedReasons,
+        }),
+      });
+      const result = await harness.handler(
+        createContext({
+          alertType,
+          payload: createPayload(alertType, {
+            reason: disallowedReasons[alertType],
+          }),
+          octokit: harness.incomingOctokit,
+        }),
+        definition.eventName
+      );
+      assert.equal(result.action, 'dispatched');
+      assert.equal(harness.calls.incomingRequests.length, 0);
+      assert.equal(harness.calls.controlRequests.length, 1);
+      const dispatch = harness.calls.controlRequests[0].parameters.client_payload;
+      assert.deepEqual(dispatch.request.dismissal_reasons, [
+        disallowedReasons[alertType],
+      ]);
+      assert.equal(
+        JSON.stringify(dispatch).includes('allowed_dismissal_reasons'),
+        false
+      );
+    });
+  }
+
+  it('denies missing reasons and permits none when an empty list is configured', async () => {
+    for (const [reasons, reason] of [[['revoked'], null], [[], 'revoked']]) {
+      const harness = createHarness({
+        config: createConfig({
+          review_mode: 'both',
+          allowed_dismissal_reasons: { secret_scanning: reasons },
+        }),
+      });
+      const result = await harness.handler(
+        createContext({
+          alertType: 'secret_scanning',
+          payload: createPayload('secret_scanning', { reason }),
+          octokit: harness.incomingOctokit,
+        }),
+        EVENT_DEFINITIONS.secret_scanning.eventName
+      );
+      assert.equal(result.action, 'denied');
+      assert.equal(harness.calls.controlRequests.length, 0);
+      const message = harness.calls.incomingRequests[0].parameters.message;
+      assert.match(message, /resubmit the dismissal request/);
+      assert.ok(
+        message.includes(reasons.length ? '"revoked"' : 'Permitted reasons: none')
+      );
+    }
+  });
+
+  it('prioritizes reason guidance and preserves it in custom denial templates', async () => {
+    for (const template of [
+      'Denied for {requester}.',
+      'Reason: {denial_reason}',
+      'Custom denial. '.repeat(200),
+    ]) {
+      const harness = createHarness({
+        config: createConfig({
+          review_mode: 'both',
+          required_phrase: 'missing phrase',
+          allowed_dismissal_reasons: { code_scanning: ['false positive'] },
+          denial_message: template,
+        }),
+      });
+      const result = await harness.handler(
+        createContext({ octokit: harness.incomingOctokit }),
+        EVENT_DEFINITIONS.code_scanning.eventName
+      );
+      assert.equal(result.action, 'denied');
+      const message = harness.calls.incomingRequests[0].parameters.message;
+      assert.match(message, /Please resubmit the dismissal request/);
+      assert.match(message, /Permitted reasons: "false positive"/);
+      assert.doesNotMatch(message, /required phrase/);
+      assert.equal(harness.calls.controlRequests.length, 0);
+    }
+  });
+
+  it('still applies comment requirements when the dismissal reason is permitted', async () => {
+    const harness = createHarness({
+      config: createConfig({
+        review_mode: 'both',
+        required_phrase: 'missing phrase',
+        allowed_dismissal_reasons: { code_scanning: ['used in tests'] },
+      }),
+    });
+    const result = await harness.handler(
+      createContext({ octokit: harness.incomingOctokit }),
+      EVENT_DEFINITIONS.code_scanning.eventName
+    );
+    assert.equal(result.action, 'denied');
+    assert.match(
+      harness.calls.incomingRequests[0].parameters.message,
+      /required phrase/
+    );
+    assert.equal(harness.calls.controlRequests.length, 0);
+  });
+
+  it('validates policy configuration only when deterministic checks are enabled', async () => {
+    for (const reviewMode of ['deterministic', 'both']) {
+      assert.throws(
+        () => createHarness({
+          config: createConfig({
+            review_mode: reviewMode,
+            allowed_dismissal_reasons: { code_scanning: 'false positive' },
+          }),
+        }),
+        /allowed_dismissal_reasons.code_scanning must be an array/
+      );
+    }
+
+    for (const policy of [
+      null,
+      { code_scanning: 'false positive' },
+      { code_scanning: [] },
+    ]) {
+      const harness = createHarness({
+        config: createConfig({ allowed_dismissal_reasons: policy }),
+      });
+      const result = await harness.handler(
+        createContext({ octokit: harness.incomingOctokit }),
+        EVENT_DEFINITIONS.code_scanning.eventName
+      );
+      assert.equal(result.action, 'dispatched');
+      assert.equal(harness.calls.incomingRequests.length, 0);
+    }
   });
 });
 

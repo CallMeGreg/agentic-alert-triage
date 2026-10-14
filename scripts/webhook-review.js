@@ -19,6 +19,7 @@ const {
   formatDenialMessage,
   getDeterministicRules,
   validateDismissalComment,
+  validateDismissalReasons,
 } = require('./deterministic-review');
 
 const MAX_ALERTS_PER_REQUEST = 100;
@@ -538,7 +539,8 @@ function createWebhookReviewHandler(options) {
   } = options;
   const settings = getAgenticSettings(config);
   const enabledAlertTypes = getEnabledAlertTypes(config);
-  const deterministicRules = getDeterministicRules(config);
+  const deterministicRules =
+    settings.reviewMode === 'agentic' ? null : getDeterministicRules(config);
   const cacheSettings = getCacheSettings(config);
   const appIdentityCache = new BoundedTtlCache({
     ttlMs: cacheSettings.appIdentityTtlSeconds * 1000,
@@ -669,19 +671,29 @@ function createWebhookReviewHandler(options) {
         validateEnterpriseApp(data, settings.enterprise);
       }
     );
-    let commentValidation = { valid: true };
+    let reasonValidation = { valid: true };
+    let requestValidation = { valid: true };
     if (settings.reviewMode !== 'agentic') {
-      commentValidation = validateDismissalComment(
-        event.dismissalRequest.requester_comment,
+      reasonValidation = validateDismissalReasons(
+        event.dismissalRequest.exemption_request_data.data.map(
+          (item) => item.reason
+        ),
+        event.alertType,
         deterministicRules
       );
+      requestValidation = reasonValidation.valid
+        ? validateDismissalComment(
+            event.dismissalRequest.requester_comment,
+            deterministicRules
+          )
+        : reasonValidation;
     }
 
     const shouldDeny =
-      settings.reviewMode !== 'agentic' && !commentValidation.valid;
+      settings.reviewMode !== 'agentic' && !requestValidation.valid;
     const shouldDispatch =
       settings.reviewMode === 'agentic' ||
-      (settings.reviewMode === 'both' && commentValidation.valid);
+      (settings.reviewMode === 'both' && requestValidation.valid);
 
     if (!shouldDeny && !shouldDispatch) {
       context.log.info(
@@ -736,9 +748,10 @@ function createWebhookReviewHandler(options) {
                 alertType: event.alertType,
                 alertNumber,
                 requester: event.dismissalRequest.requester_login,
-                denialReason: commentValidation.reason,
+                denialReason: requestValidation.reason,
                 repoFullName: event.repository,
                 helpContact: settings.helpContact,
+                requireDenialReason: !reasonValidation.valid,
               },
               config
             );
