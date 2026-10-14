@@ -10,8 +10,6 @@ enterprise: your-enterprise
 review_mode: both
 
 # Optional deterministic criteria. If all are omitted, every request passes.
-# Reasons are restricted only in deterministic and both modes. Omit this option
-# or an alert type to permit all reasons. An empty list permits no reasons.
 # Use exact, case-sensitive webhook reason values, not their UI labels.
 # All currently supported reason values are shown below. Leave this block
 # commented out to permit all reasons by default, including future values.
