@@ -245,6 +245,24 @@ so the copies must stay aligned:
 enterprise: your-enterprise
 review_mode: both
 
+# allowed_dismissal_reasons:
+#   code_scanning:
+#     - "false positive"
+#     - "won't fix"
+#     - "used in tests"
+#     - "mitigated"
+#   dependabot:
+#     - "fix_started"
+#     - "inaccurate"
+#     - "no_bandwidth"
+#     - "not_used"
+#     - "tolerable_risk"
+#   secret_scanning:
+#     - "false_positive"
+#     - "wont_fix"
+#     - "revoked"
+#     - "used_in_tests"
+
 required_pattern: "https://github\\.com/[a-zA-Z0-9-]+/[a-zA-Z0-9._-]+/issues/\\d+"
 minimum_length: 20
 case_sensitive: false
