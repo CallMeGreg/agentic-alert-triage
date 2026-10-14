@@ -4,12 +4,25 @@
 # organization is not supported. No organization allowlist is needed.
 enterprise: your-enterprise
 
-# deterministic: deny comments that fail the configured criteria.
+# deterministic: deny requests that fail the configured criteria.
 # agentic: dispatch every created request to the gh-aw workflow.
 # both: deny deterministic failures and dispatch passing requests.
 review_mode: both
 
-# Optional deterministic criteria. If all are omitted, every comment passes.
+# Optional deterministic criteria. If all are omitted, every request passes.
+# Reasons are restricted only in deterministic and both modes. Omit this option
+# or an alert type to permit all reasons. An empty list permits no reasons.
+# Use exact, case-sensitive webhook reason values, not their UI labels.
+# allowed_dismissal_reasons:
+#   code_scanning:
+#     - "false positive"
+#     - "used in tests"
+#   dependabot:
+#     - not_used
+#   secret_scanning:
+#     - revoked
+#     - false_positive
+
 # required_phrase: "mitigating control"
 # URL-format check only; agentic evidence remains restricted to the target org.
 required_pattern: "https://github\\.com/[a-zA-Z0-9-]+/[a-zA-Z0-9._-]+/issues/\\d+"

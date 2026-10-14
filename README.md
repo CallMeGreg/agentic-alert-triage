@@ -25,9 +25,9 @@ review, or both.
    scanning alerts. The signed webhook is the trusted snapshot of the request.
 
 2. **The configured review mode determines the checks.**
-   - Deterministic review checks whether the request comment meets configured
-     phrase, pattern, and minimum-length requirements. Requests that fail are
-     denied immediately.
+   - Deterministic review checks whether the dismissal reason is permitted
+     and the request comment meets configured phrase, pattern, and
+     minimum-length requirements. Requests that fail are denied immediately.
    - Agentic review evaluates whether the dismissal reason is clear and
      relevant, the justification explains why dismissal is appropriate, and
      the supporting evidence is concrete, verifiable, and consistent with the
@@ -276,6 +276,7 @@ from the validated webhook snapshot.
 |---|---|---|
 | `enterprise` | required | Enterprise URL slug that must own the App |
 | `review_mode` | `both` | `deterministic`, `agentic`, or `both` |
+| `allowed_dismissal_reasons` | all reasons | Optional per-alert-type lists of permitted dismissal reasons; deterministic checks only |
 | `required_phrase` | none | Phrase required in the requester comment |
 | `required_pattern` | none | JavaScript regular expression required in the requester comment |
 | `minimum_length` | none | Minimum trimmed requester-comment length |
@@ -295,6 +296,30 @@ from the validated webhook snapshot.
 | `cache.delivery_dedupe_ttl_seconds` | `900` | Successful operation dedupe TTL, 1-3600 seconds |
 | `cache.delivery_dedupe_max_entries` | `1000` | Delivery cache size, 1-10000 |
 
+To restrict dismissal reasons during deterministic review, configure exact,
+case-sensitive webhook reason values for each alert type:
+
+```yaml
+allowed_dismissal_reasons:
+  code_scanning:
+    - "false positive"
+    - "used in tests"
+  dependabot:
+    - not_used
+  secret_scanning:
+    - revoked
+    - false_positive
+```
+
+Omitting the option or an alert type permits all reasons for that type. An
+empty list (`[]`) permits no reasons. Values must be non-empty strings; use
+the webhook reason values, which may differ from the labels in GitHub's UI.
+Matching is not affected by `case_sensitive`, which applies only to comment
+checks. In `deterministic` and `both` modes, a disallowed or missing reason
+is denied before comment validation, with a message asking the requester to
+resubmit and listing the permitted reasons. `agentic` mode ignores this
+option, and it is not passed to the agentic workflow.
+
 Agentic denial placeholders are `{requester}`, `{denial_reason}`,
 `{help_contact}`, `{alert_type}`, `{alert_number}`, and `{repo_full_name}`.
 Deterministic denial placeholders are `{alert_type}`, `{alert_number}`,
@@ -304,8 +329,10 @@ Denial request responses are rendered as plain text by GitHub. The built-in
 agentic denial uses the validated enterprise-team mention
 `@/ent:appsec-team`; untrusted agent rationale has mentions neutralized. Use
 labels and plain URLs instead of other Markdown in denial templates. Avoid
-organization-specific names in shared regexes and denial templates. The
-agentic workflow reads linked evidence only from the target organization.
+organization-specific names in shared regexes and denial templates.
+Reason-policy denials prepend their guidance if a custom deterministic template
+omits `{denial_reason}`. The agentic workflow reads linked evidence only from
+the target organization.
 
 ### 8. Configure credentials
 
